@@ -968,3 +968,105 @@ cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
 ```
 
 该调用会执行 NPU advanced indexing，并把结果复制到全局 MLA cos/sin buffer，可能首次初始化索引算子的 workspace 或 executor cache。但本轮日志尚未在 MLA builder 内部继续分段，因此这只是下一轮的首要验证对象，不能作为已经证明的最终归因。
+
+## 20. Round 5 细粒度定位：4 MiB mask 与 20 MiB allocator segment
+
+本节使用 `D:\workspace\vllm-project\log\round5` 下的新日志重新核对，结论取代 19.4 节中“4 MiB 最终所有者尚不能确认”和“优先怀疑 cos/sin”的旧判断。为避免本地 Codex、Markdown 渲染器和 GitHub 对 Windows 绝对路径的解析差异，以下统一使用“实际绝对路径 + 行号”，不再把 Windows 路径包装成 Markdown 链接。
+
+### 20.1 日志行与源码行的正确对应关系
+
+`setup_only` 首次执行正式 warmup 时：
+
+| 阶段 | device | allocated | reserved | non-allocator | 实际日志位置 |
+|---|---:|---:|---:|---:|---|
+| cos cache index 后 | +4 MiB | 0 MiB | +2 MiB | +2 MiB | `D:\workspace\vllm-project\log\round5\setup_only.log:477` |
+| `get_splitfuse_attn_mask()` 后 | +20 MiB | +4 MiB | +20 MiB | 0 MiB | `D:\workspace\vllm-project\log\round5\setup_only.log:486` |
+| 外层 `after_attention_mask` | 0 MiB | 0 MiB | 0 MiB | 0 MiB | `D:\workspace\vllm-project\log\round5\setup_only.log:490` |
+| metadata 构建总增量 | +24 MiB | +4 MiB | +22 MiB | +2 MiB | `D:\workspace\vllm-project\log\round5\setup_only.log:496` |
+
+`decode_after_attention_mask` 对应的真实业务代码是：
+
+```text
+D:\workspace\vllm-project\vllm-ascend\vllm_ascend\attention\mla_v1.py:688
+    decode_attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
+
+D:\workspace\vllm-project\vllm-ascend\vllm_ascend\attention\mla_v1.py:689
+    self._trace_memory("decode_after_attention_mask")
+```
+
+因此，第 486 行记录的是执行第 688 行调用前后的差值。日志末尾显示的 `gpu_model_runner.py:6927` 只是 `_log_cudagraph_experiment_delta()` 打印日志的位置，不是产生内存的业务代码位置。
+
+日志中还有一个名字相近的外层检查点 `after_attention_mask`。它发生在 builder 返回以后，此时 mask 已经创建，所以第 490 行为零；不能用该行否定第 486 行的 +20/+4 MiB。
+
+### 20.2 4 MiB active allocation 的所有者
+
+`get_splitfuse_attn_mask()` 的实际实现位于：
+
+```text
+D:\workspace\vllm-project\vllm-ascend\vllm_ascend\attention\attention_mask.py:53-58
+```
+
+```python
+def get_splitfuse_attn_mask(self) -> torch.Tensor:
+    if self.chunked_prefill_attn_mask is None:
+        self.chunked_prefill_attn_mask = (
+            torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8).to(self.device)
+        )
+    return self.chunked_prefill_attn_mask
+```
+
+最终缓存在 `AttentionMaskBuilder.chunked_prefill_attn_mask` 中的 NPU tensor 大小为：
+
+```text
+2048 × 2048 × sizeof(int8) = 4,194,304 bytes = 4 MiB
+```
+
+它与第 486 行新增的 `allocated=+4.00 MiB` 精确一致。结合调用前后的细粒度检查点，可以把持续存在的 4 MiB active allocation 归到 `chunked_prefill_attn_mask`，而不是 cos/sin 缓存，也不是 `_build_attention_metadata()` 返回的 Python metadata 对象。
+
+该 mask 之所以在释放返回的 metadata 后仍然存在，是因为它还被长期存活的 `AttentionMaskBuilder` 缓存在 `self.chunked_prefill_attn_mask` 字段中。
+
+### 20.3 20 MiB reserved 的准确含义
+
+`reserved=+20 MiB` 不是另一个独立的 20 MiB tensor，也不能与 `allocated=+4 MiB` 相加成 24 MiB。二者是包含关系：
+
+```text
+本次调用新增的 allocator reserved segment：约 20 MiB
+├── 仍然活跃的 chunked_prefill_attn_mask：4 MiB allocated
+└── allocator 内部空闲块、临时 tensor 使用后留下的缓存或碎片：约 16 MiB
+```
+
+所以更准确的表述是：首次调用 `get_splitfuse_attn_mask()` 创建并缓存了 4 MiB 的 int8 NPU mask，同时使 NPU caching allocator 扩展了 20 MiB reserved 空间。
+
+### 20.4 profile 如何把这部分成本移出正式 capture
+
+两组 profile 日志在首次创建 mask 时都出现相同增量：
+
+| 模式 | profile 中的 `decode_after_attention_mask` | 日志位置 |
+|---|---|---|
+| `metadata_keep` | device +20 / allocated +4 / reserved +20 MiB | `D:\workspace\vllm-project\log\round5\metadata_keep.log:456` |
+| `metadata_release` | device +20 / allocated +4 / reserved +20 MiB | `D:\workspace\vllm-project\log\round5\metadata_release.log:456` |
+
+进入正式 capture 前的 actual warmup 后，第二次调用直接复用缓存，增量都变为零：
+
+| 模式 | actual warmup 中的 `decode_after_attention_mask` | 日志位置 |
+|---|---|---|
+| `metadata_keep` | device/allocated/reserved/non-allocator 均为 0 | `D:\workspace\vllm-project\log\round5\metadata_keep.log:547` |
+| `metadata_release` | device/allocated/reserved/non-allocator 均为 0 | `D:\workspace\vllm-project\log\round5\metadata_release.log:545` |
+
+正式 capture 返回时也呈现精确的阶段迁移：
+
+| 模式 | allocated 增量 | reserved 增量 | 日志位置 |
+|---|---:|---:|---|
+| `setup_only`，直接 capture | +4 MiB | +306 MiB | `D:\workspace\vllm-project\log\round5\setup_only.log:720` |
+| `metadata_keep`，先 profile | 0 MiB | +286 MiB | `D:\workspace\vllm-project\log\round5\metadata_keep.log:781` |
+| `metadata_release`，先 profile | 0 MiB | +286 MiB | `D:\workspace\vllm-project\log\round5\metadata_release.log:779` |
+
+profile 组的正式 capture 恰好少新增 4 MiB allocated 和 20 MiB reserved。这不是最终内存减少，而是 profile 提前触发了 `get_splitfuse_attn_mask()` 的延迟初始化，使正式 capture 复用已经存在的 mask 和 allocator segment。
+
+### 20.5 当前结论
+
+1. 4 MiB active allocation 是 `AttentionMaskBuilder.chunked_prefill_attn_mask`，即一个 `2048 × 2048` 的 int8 NPU attention mask；
+2. 20 MiB 是首次构造该 mask 的整个调用使 caching allocator 新增的 reserved segment，其中包含 4 MiB active mask；
+3. profile 提前创建并缓存该 mask，所以后续正式 capture 的 `decode_after_attention_mask` 增量为零；
+4. `metadata_keep` 与 `metadata_release` 的结果不能证明“这不是 metadata 路径产生的”，它们证明的是“返回的 metadata 对象不是最终 owner”；真正 owner 是 metadata builder 持有的长期缓存字段；
+5. cos cache index 仍会单独触发约 2 MiB reserved，但它不是本次 4 MiB active / 20 MiB reserved 差值的主要来源。
