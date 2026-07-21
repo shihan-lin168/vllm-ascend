@@ -17,6 +17,7 @@
 
 import math
 import os
+from collections.abc import Callable
 
 import torch
 import torch_npu
@@ -87,19 +88,43 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
         _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
 
 
-def get_cos_and_sin_mla(positions, use_cache=False):
+def get_cos_and_sin_mla(
+    positions,
+    use_cache=False,
+    memory_trace_callback: Callable[[str], None] | None = None,
+):
     global _cos_cache
     global _sin_cache
-    cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
-    sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
+    cos = _cos_cache[positions]
+    if memory_trace_callback is not None:
+        memory_trace_callback("after_cos_cache_index")
+    cos = cos.unsqueeze(1).unsqueeze(2)
+    if memory_trace_callback is not None:
+        memory_trace_callback("after_cos_unsqueeze_views")
+
+    sin = _sin_cache[positions]
+    if memory_trace_callback is not None:
+        memory_trace_callback("after_sin_cache_index")
+    sin = sin.unsqueeze(1).unsqueeze(2)
+    if memory_trace_callback is not None:
+        memory_trace_callback("after_sin_unsqueeze_views")
+
     if not use_cache:
         return cos, sin
     global _cos_mla
     global _sin_mla
     num_tokens = positions.size(0)
     _cos_mla[:num_tokens, ...] = cos
+    if memory_trace_callback is not None:
+        memory_trace_callback("after_cos_mla_copy")
     _sin_mla[:num_tokens, ...] = sin
-    return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
+    if memory_trace_callback is not None:
+        memory_trace_callback("after_sin_mla_copy")
+    cos_output = _cos_mla[:num_tokens, ...]
+    sin_output = _sin_mla[:num_tokens, ...]
+    if memory_trace_callback is not None:
+        memory_trace_callback("after_mla_output_views")
+    return cos_output, sin_output
 
 
 def _record_cos_sin_cache(cos_sin_cache):

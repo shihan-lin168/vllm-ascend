@@ -109,7 +109,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.mla_v1 import AscendMLABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
@@ -3108,11 +3108,60 @@ class NPUModelRunner(GPUModelRunner):
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return {}, None
+        experiment_mode = getattr(
+            self, "_cudagraph_memory_experiment_mode", ""
+        )
+        max_trace_tokens = (
+            self.vllm_config.compilation_config.max_cudagraph_capture_size
+        )
+        trace_mla_metadata = (
+            experiment_mode in ("setup_only", "metadata_keep", "metadata_release")
+            and issubclass(self.attn_backend, AscendMLABackend)
+            and not for_cudagraph_capture
+            and max_trace_tokens is not None
+            and num_tokens == max_trace_tokens
+        )
+        previous_metadata_snapshot = None
+        trace_stage = ""
+        trace_prefix = ""
+        if trace_mla_metadata:
+            previous_metadata_snapshot = self._cudagraph_memory_snapshot()
+            trace_stage = (
+                "profile"
+                if getattr(
+                    self, "_cudagraph_metadata_experiment_active", ""
+                )
+                else "actual_warmup"
+            )
+            trace_prefix = f"mla_metadata_{trace_stage}_size_{num_tokens}"
+            logger.info(
+                "CUDA graph MLA metadata trace: stage=%s, size=%d, "
+                "num_reqs=%d",
+                trace_stage,
+                num_tokens,
+                num_reqs,
+            )
+
+        def trace_metadata_memory(checkpoint: str) -> None:
+            nonlocal previous_metadata_snapshot
+            if not trace_mla_metadata:
+                return
+            assert previous_metadata_snapshot is not None
+            current_snapshot = self._cudagraph_memory_snapshot()
+            self._log_cudagraph_experiment_delta(
+                f"{trace_prefix}_{checkpoint}",
+                previous_metadata_snapshot,
+                current_snapshot,
+            )
+            previous_metadata_snapshot = current_snapshot
+
+        trace_metadata_memory("function_entry")
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+        trace_metadata_memory("after_metadata_container")
 
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
@@ -3121,7 +3170,7 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len = self.max_model_len
         else:
             max_seq_len = self.optimistic_seq_lens_cpu.numpy()[:num_reqs].max().item()
-
+        trace_metadata_memory("after_max_seq_len")
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
@@ -3199,7 +3248,9 @@ class NPUModelRunner(GPUModelRunner):
             return blk_table_tensor, slot_mapping
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
+        trace_metadata_memory("after_block_table_slot_mapping")
         self.long_seq_metadata, block_table_gid_0 = _get_pcp_metadata(block_table_gid_0)
+        trace_metadata_memory("after_pcp_metadata")
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs_padded
         ]
@@ -3213,6 +3264,7 @@ class NPUModelRunner(GPUModelRunner):
             # GPU tensors are authoritative in async mode.
             seq_lens_cpu = None
             num_computed_tokens_cpu = None
+        trace_metadata_memory("after_sequence_state")
 
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
@@ -3248,6 +3300,7 @@ class NPUModelRunner(GPUModelRunner):
             group_key_idx = self.group_key_idx.gpu[:num_reqs_padded],
             group_key_cache_idx = self.group_key_cache_idx.gpu[:num_reqs_padded],
         )
+        trace_metadata_memory("after_common_metadata_object")
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
@@ -3264,6 +3317,26 @@ class NPUModelRunner(GPUModelRunner):
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
+            trace_mla_builder = (
+                trace_mla_metadata
+                and isinstance(builder, AscendMLAMetadataBuilder)
+            )
+            if trace_mla_builder:
+                def trace_builder_memory(checkpoint: str) -> None:
+                    trace_metadata_memory(
+                        f"kv_{kv_cache_gid}_attn_{attn_gid}_{checkpoint}"
+                    )
+
+                logger.info(
+                    "CUDA graph MLA metadata builder: stage=%s, size=%d, "
+                    "kv_cache_gid=%d, attn_gid=%d, builder=%s",
+                    trace_stage,
+                    num_tokens,
+                    kv_cache_gid,
+                    attn_gid,
+                    type(builder).__name__,
+                )
+                builder._set_memory_trace_callback(trace_builder_memory)
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid] if cascade_attn_prefix_lens else 0
             )
@@ -3289,25 +3362,36 @@ class NPUModelRunner(GPUModelRunner):
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
 
-            if (for_cudagraph_capture
-                    and not isinstance(builder, (
-                        AscendDSAMetadataBuilder,
-                        AscendDSACPMetadataBuilder,
-                        AscendSFADCPMetadataBuilder,
-                    ))):
-                attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
-            else:
-                attn_metadata_i = builder.build(
-                    common_prefix_len=cascade_attn_prefix_len,
-                    common_attn_metadata=common_attn_metadata,
-                    **extra_attn_metadata_args,
-                )
-                # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
-                # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
-                if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
-                    and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
-                    if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
-                        attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
+            try:
+                if (for_cudagraph_capture
+                        and not isinstance(builder, (
+                            AscendDSAMetadataBuilder,
+                            AscendDSACPMetadataBuilder,
+                            AscendSFADCPMetadataBuilder,
+                        ))):
+                    attn_metadata_i = builder.build_for_cudagraph_capture(common_attn_metadata)
+                else:
+                    attn_metadata_i = builder.build(
+                        common_prefix_len=cascade_attn_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                        **extra_attn_metadata_args,
+                    )
+                    # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
+                    # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
+                    if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
+                        and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
+                        if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
+                            attn_metadata_i.spec_state_indices_tensor[
+                                attn_metadata_i.num_spec_decodes:
+                            ].fill_(0)
+                if trace_mla_builder:
+                    trace_metadata_memory(
+                        f"kv_{kv_cache_gid}_attn_{attn_gid}_"
+                        "after_builder_call"
+                    )
+            finally:
+                if trace_mla_builder:
+                    builder._set_memory_trace_callback(None)
             if isinstance(builder, AscendDSAMetadataBuilder):
                 prefill_ratio_to_sas_metadata = builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
                 decode_ratio_to_sas_metadata = builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
@@ -3322,6 +3406,10 @@ class NPUModelRunner(GPUModelRunner):
 
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
+            if trace_mla_builder:
+                trace_metadata_memory(
+                    f"kv_{kv_cache_gid}_attn_{attn_gid}_after_layer_fanout"
+                )
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
@@ -3403,6 +3491,7 @@ class NPUModelRunner(GPUModelRunner):
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
+        trace_metadata_memory("function_return")
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(

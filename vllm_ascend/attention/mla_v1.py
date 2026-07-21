@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
@@ -284,6 +285,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        self._memory_trace_callback: Callable[[str], None] | None = None
+
+    def _set_memory_trace_callback(
+        self,
+        callback: Callable[[str], None] | None,
+    ) -> None:
+        """Install a temporary callback for metadata ownership experiments."""
+        self._memory_trace_callback = callback
+
+    def _trace_memory(self, checkpoint: str) -> None:
+        if self._memory_trace_callback is not None:
+            self._memory_trace_callback(checkpoint)
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -425,6 +438,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AscendMLAMetadata:
+        self._trace_memory("builder_entry")
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -436,6 +450,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 treat_short_extends_as_decodes=common_attn_metadata.prefill_context_parallel_metadata is None,
             )
         )
+        self._trace_memory("after_split_decodes_prefills")
         self.set_num_actual_tokens(common_attn_metadata)
         assert self.num_decodes + self.num_prefills == num_reqs
         assert self.num_decode_tokens + self.num_prefill_tokens == common_attn_metadata.num_actual_tokens
@@ -457,25 +472,33 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.graph_pad_size = common_attn_metadata.graph_pad_size
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_PREFILL)
         self.block_table = common_attn_metadata.block_table_tensor[:block_table_size]
+        self._trace_memory("after_common_metadata_views")
 
         prefill_metadata = None
         if self.num_prefills > 0:
             prefill_metadata = self.build_prefill_metadata(common_prefix_len, common_attn_metadata)
+        self._trace_memory("after_prefill_metadata")
 
         decode_metadata = None
         if self.num_decodes > 0:
             decode_metadata = self.build_decode_metadata(common_prefix_len, common_attn_metadata)
-        return self.metadata_cls(  # type: ignore
+        self._trace_memory("after_decode_metadata")
+
+        query_lens = self.query_lens.tolist()
+        self._trace_memory("after_query_lens_to_list")
+        attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
+        self._trace_memory("after_attention_mask")
+        metadata = self.metadata_cls(  # type: ignore
             num_actual_tokens_pcp_padded=self.num_actual_tokens,
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=self.num_actual_tokens,
-            query_lens=self.query_lens.tolist(),
+            query_lens=query_lens,
             slot_mapping=self.slot_mapping,
             head_dim=self.model_config.get_head_size(),
             num_decodes=self.num_decodes,
             num_decode_tokens=self.num_decode_tokens,
             num_prefills=self.num_prefills,
-            attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
+            attn_mask=attn_mask,
             attn_state=common_attn_metadata.attn_state,
             prefill=prefill_metadata,
             decode=decode_metadata,
@@ -484,6 +507,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens,
         )
+        self._trace_memory("after_metadata_object")
+        return metadata
 
     def build_chunked_metadata(
         self,
@@ -587,21 +612,26 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
         input_positions = common_attn_metadata.positions[: self.num_actual_tokens].long()
+        self._trace_memory("decode_after_positions_long")
 
         # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
         actual_seq_lengths_q = query_start_loc_cpu[1 : self.num_decodes + 1].tolist()
+        self._trace_memory("decode_after_query_start_to_list")
         max_seq_lens = self.seq_lens[: self.num_decodes].max().item()
+        self._trace_memory("decode_after_max_seq_lens")
         self.seq_lens = self.seq_lens[: self.num_decodes]
         input_positions = input_positions[: self.num_decode_tokens]
 
         block_table_size = self.get_block_table_size(common_attn_metadata, BUILD_METADATA_STEP_DECODE)
         self.block_table = self.block_table[:block_table_size]
+        self._trace_memory("decode_after_block_table_view")
 
         # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
         if self.graph_pad_size > self.num_decodes and self.speculative_config.disable_padded_drafter_batch:
             self.block_table = self.block_table[: self.graph_pad_size, ...]
         seq_lens_list = self.seq_lens.tolist()
+        self._trace_memory("decode_after_seq_lens_to_list")
 
         cp_seq_len = None
 
@@ -644,20 +674,32 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_enable_pad(
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
                 )
+        self._trace_memory("decode_after_padding")
 
-        cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+        cos, sin = get_cos_and_sin_mla(
+            input_positions,
+            use_cache=True,
+            memory_trace_callback=self._memory_trace_callback,
+        )
+        self._trace_memory("decode_after_get_cos_sin")
+        sin_view = sin[: self.num_decode_tokens, ...]
+        cos_view = cos[: self.num_decode_tokens, ...]
+        self._trace_memory("decode_after_rope_output_views")
+        decode_attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
+        self._trace_memory("decode_after_attention_mask")
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=self.block_table,
             seq_lens=self.seq_lens,
             seq_lens_list=seq_lens_list,
             max_seq_lens=max_seq_lens,
-            attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
+            attn_mask=decode_attn_mask,
             actual_seq_lengths_q=actual_seq_lengths_q,
-            sin=sin[: self.num_decode_tokens, ...],
-            cos=cos[: self.num_decode_tokens, ...],
+            sin=sin_view,
+            cos=cos_view,
             cp_seq_len=cp_seq_len,
         )
+        self._trace_memory("decode_after_metadata_object")
         return decode_metadata
 
     def build_for_graph_capture(
