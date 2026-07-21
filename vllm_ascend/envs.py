@@ -99,6 +99,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Diagnostic ACL graph memory profiling stage. Valid values are ""
+    # (disabled, default), "profile", "skip", "setup_only", "warmup_only",
+    # "capture_only", "metadata_keep", and "metadata_release". The metadata
+    # modes isolate ownership of attention metadata allocations. This is not
+    # sensitive.
+    "VLLM_ASCEND_DEBUG_ACLGRAPH_MEMORY_EXPERIMENT": lambda: os.getenv(
+        "VLLM_ASCEND_DEBUG_ACLGRAPH_MEMORY_EXPERIMENT", ""
+    ),
 }
 
 # end-env-vars-definition

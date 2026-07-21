@@ -6,7 +6,7 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
@@ -20,6 +20,7 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
@@ -82,6 +83,13 @@ class ACLGraphWrapper:
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
+    _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+
+    @classmethod
+    def clear_all_graphs(cls) -> None:
+        for instance in list(cls._all_instances):
+            instance.clear_graphs()
+
     def __init__(
         self,
         runnable: Callable,
@@ -116,6 +124,8 @@ class ACLGraphWrapper:
         self.use_eagle = use_eagle
         _acl_graph_wrappers.add(self)
 
+        ACLGraphWrapper._all_instances.add(self)
+
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
@@ -129,6 +139,13 @@ class ACLGraphWrapper:
     def unwrap(self) -> Callable:
         # in case we need to access the original runnable.
         return self.runnable
+
+    @property
+    def cudagraph_wrapper(self) -> "ACLGraphWrapper":
+        return self
+
+    def clear_graphs(self) -> None:
+        self.concrete_aclgraph_entries.clear()
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
@@ -151,6 +168,66 @@ class ACLGraphWrapper:
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
         if entry.aclgraph is None:
+            capture_snapshot = None
+            traced_capture_sizes = set(
+                sorted(
+                    self.vllm_config.compilation_config.cudagraph_capture_sizes
+                    or (),
+                    reverse=True,
+                )[:2]
+            )
+            trace_capture_memory = (
+                bool(
+                    envs_ascend.VLLM_ASCEND_DEBUG_ACLGRAPH_MEMORY_EXPERIMENT
+                )
+                and self.runtime_mode == CUDAGraphMode.FULL
+                and batch_descriptor.num_tokens in traced_capture_sizes
+            )
+
+            def log_capture_step(step: str) -> None:
+                nonlocal capture_snapshot
+                if not trace_capture_memory:
+                    return
+                torch.npu.synchronize()
+                free_memory, total_memory = torch.npu.mem_get_info()
+                memory_stats = torch.npu.memory_stats()
+                allocated_memory = memory_stats.get(
+                    "allocated_bytes.all.current", 0
+                )
+                reserved_memory = memory_stats.get(
+                    "reserved_bytes.all.current", 0
+                )
+                current_snapshot = (
+                    free_memory,
+                    allocated_memory,
+                    reserved_memory,
+                    total_memory,
+                )
+                if capture_snapshot is not None:
+                    device_delta = capture_snapshot[0] - current_snapshot[0]
+                    allocated_delta = (
+                        current_snapshot[1] - capture_snapshot[1]
+                    )
+                    reserved_delta = (
+                        current_snapshot[2] - capture_snapshot[2]
+                    )
+                    logger.info(
+                        "ACL graph capture internal: phase=%s, mode=%s, "
+                        "size=%d, wrapper=%s, device=%+.2f MiB, "
+                        "allocated=%+.2f MiB, reserved=%+.2f MiB, "
+                        "non_allocator=%+.2f MiB",
+                        step,
+                        self.runtime_mode.name,
+                        batch_descriptor.num_tokens,
+                        id(self),
+                        device_delta / (1 << 20),
+                        allocated_delta / (1 << 20),
+                        reserved_delta / (1 << 20),
+                        (device_delta - reserved_delta) / (1 << 20),
+                    )
+                capture_snapshot = current_snapshot
+
+            log_capture_step("before_npugraph")
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
@@ -163,6 +240,7 @@ class ACLGraphWrapper:
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
             aclgraph = torch.npu.NPUGraph()
+            log_capture_step("after_npugraph")
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:
@@ -200,6 +278,7 @@ class ACLGraphWrapper:
                             # the output of the last graph will not be used by
                             # any other acl graph.
                             output = weak_ref_tensors(output)
+                    log_capture_step("after_graph_context")
                 except RuntimeError as exc:
                     if _is_old_hdk_capture_error(exc):
                         raise RuntimeError(
@@ -232,6 +311,7 @@ class ACLGraphWrapper:
             # to save memory
             entry.output = weak_ref_tensors(output)
             entry.aclgraph = aclgraph
+            log_capture_step("after_entry_store")
 
             compilation_counter.num_cudagraph_captured += 1
 
@@ -307,6 +387,13 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
+
+
+def reset_graph_params():
+    global _graph_params, _draft_graph_params, _draft_graph_prefill_params
+    _graph_params = None
+    _draft_graph_params = None
+    _draft_graph_prefill_params = None
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):

@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import gc
 import logging
 import math
 import sys
@@ -119,6 +120,7 @@ from vllm_ascend.attention.utils import (
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
+    reset_graph_params,
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
@@ -3417,6 +3419,84 @@ class NPUModelRunner(GPUModelRunner):
         # it only happens for cudagraph_runtime_mode=FULL.
         return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
 
+    def _install_dummy_model_memory_hooks(
+        self,
+        num_tokens: int,
+        trace_run: int,
+    ) -> list[Any]:
+        """Trace persistent memory initialized by high-level decoder modules.
+
+        The hooks are installed only around an eager dummy model forward by the
+        caller. Taking a snapshot synchronizes the NPU, so keep the module set
+        deliberately small: decoder layer, attention, MLP, and the two common
+        MoE submodules. The delta between consecutive hook events tells us
+        which module first materializes allocator or non-allocator state.
+        """
+        assert self.model is not None
+        previous_snapshot = self._cudagraph_memory_snapshot()
+        handles: list[Any] = []
+
+        def is_target_module(name: str) -> bool:
+            parts = name.split(".")
+            for index, part in enumerate(parts[:-1]):
+                if part != "layers" or not parts[index + 1].isdigit():
+                    continue
+                suffix = ".".join(parts[index + 2 :])
+                return suffix in (
+                    "",
+                    "self_attn",
+                    "mlp",
+                    "mlp.experts",
+                    "mlp.shared_experts",
+                )
+            return False
+
+        def log_module_event(event: str, name: str) -> None:
+            nonlocal previous_snapshot
+            current_snapshot = self._cudagraph_memory_snapshot()
+            phase = (
+                f"dummy_model_run_{trace_run}_size_{num_tokens}_"
+                f"{event}_{name}"
+            )
+            self._log_cudagraph_experiment_delta(
+                phase, previous_snapshot, current_snapshot
+            )
+            previous_snapshot = current_snapshot
+
+        def make_pre_hook(name: str):
+            def pre_hook(_module, _args) -> None:
+                log_module_event("pre", name)
+
+            return pre_hook
+
+        def make_post_hook(name: str):
+            def post_hook(_module, _args, _output) -> None:
+                log_module_event("post", name)
+
+            return post_hook
+
+        for name, module in self.model.named_modules():
+            if not is_target_module(name):
+                continue
+            handles.append(module.register_forward_pre_hook(make_pre_hook(name)))
+            handles.append(module.register_forward_hook(make_post_hook(name)))
+
+        logger.info(
+            "CUDA graph experiment model hooks: trace_run=%d, size=%d, "
+            "module_count=%d",
+            trace_run,
+            num_tokens,
+            len(handles) // 2,
+        )
+        return handles
+
+    def release_cudagraph_metadata_experiment_hold(self) -> None:
+        """Release metadata retained by the ownership experiment."""
+        self._cudagraph_metadata_experiment_hold = None
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -3437,6 +3517,42 @@ class NPUModelRunner(GPUModelRunner):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
+        experiment_mode = getattr(
+            self, "_cudagraph_memory_experiment_mode", ""
+        )
+        trace_dummy_warmup = (
+            experiment_mode
+            in (
+                "profile",
+                "skip",
+                "setup_only",
+                "warmup_only",
+                "capture_only",
+                "metadata_keep",
+                "metadata_release",
+            )
+            and force_attention
+            and not is_profile
+            and not is_graph_capturing
+        )
+        dummy_warmup_snapshot = None
+
+        def log_dummy_warmup_step(step: str) -> None:
+            nonlocal dummy_warmup_snapshot
+            if not trace_dummy_warmup:
+                return
+            current_snapshot = self._cudagraph_memory_snapshot()
+            checkpoint = f"dummy_warmup_size_{num_tokens}_{step}"
+            self._log_cudagraph_memory_checkpoint(
+                checkpoint, current_snapshot
+            )
+            if dummy_warmup_snapshot is not None:
+                self._log_cudagraph_experiment_delta(
+                    checkpoint, dummy_warmup_snapshot, current_snapshot
+                )
+            dummy_warmup_snapshot = current_snapshot
+
+        log_dummy_warmup_step("entry")
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.separate_routine(). This means that we are using
         # different graphs and/or modes for mixed prefill-decode batches vs.
@@ -3519,6 +3635,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         num_tokens_padded = batch_desc.num_tokens
         num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+        log_dummy_warmup_step("after_batch_setup")
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
@@ -3530,6 +3647,7 @@ class NPUModelRunner(GPUModelRunner):
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
+        spec_decode_common_attn_metadata = None
         # Build attention metadata for dummy_run
         if self._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode):
             if create_mixed_batch:
@@ -3560,6 +3678,7 @@ class NPUModelRunner(GPUModelRunner):
             self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
             self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
             self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
+            log_dummy_warmup_step("after_seq_lens_copy")
 
             cum_num_tokens = self._get_cumsum_and_arange(
             num_scheduled_tokens, self.query_pos.np)
@@ -3568,6 +3687,7 @@ class NPUModelRunner(GPUModelRunner):
             if self._has_gdn:
                 self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
                 copy_snapshot_to_gpu(self.gdn_query_start_loc)
+            log_dummy_warmup_step("after_query_start_loc_copy")
 
             if not profile_cpp:
                 num_reqs_padded = self._pad_query_start_loc_for_fia(
@@ -3578,18 +3698,24 @@ class NPUModelRunner(GPUModelRunner):
                     cudagraph_runtime_mode,
                     batch_desc.num_reqs,
                 )
+            log_dummy_warmup_step("after_query_start_loc_padding")
 
             # Dummy graph runs do not go through _prepare_inputs(), but GDN/Mamba
             # metadata reads block_table[:num_reqs_padded] below. Sync padded
             # rows as well so device-side metadata does not see stale block ids.
             self.input_batch.block_table.commit_block_table(num_reqs_padded)
+            log_dummy_warmup_step("after_block_table_commit")
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             # check how to build dummy
             if self.use_compress:
                 self.positions.fill_(127)
                 self._dsa_positions_cpu_buf.fill_(127)
-            attn_metadata, _ = self._build_attention_metadata(
+            log_dummy_warmup_step("before_build_attention_metadata")
+            (
+                attn_metadata,
+                spec_decode_common_attn_metadata,
+            ) = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_tokens_padded=num_tokens_padded,
                 num_reqs=num_reqs,
@@ -3599,10 +3725,53 @@ class NPUModelRunner(GPUModelRunner):
                 for_cudagraph_capture=is_graph_capturing,
                 num_scheduled_tokens_np=num_scheduled_tokens,
             )
+            log_dummy_warmup_step("after_build_attention_metadata")
             if not is_graph_capturing:
                 for kv_cache_gid in range(len(self.kv_cache_config.kv_cache_groups)):
                     blk_table = self.input_batch.block_table[kv_cache_gid]
                     blk_table.slot_mapping.gpu.fill_(-1)
+            log_dummy_warmup_step("after_slot_mapping_fill")
+
+        log_dummy_warmup_step("after_attention_metadata")
+
+        metadata_experiment_action = getattr(
+            self, "_cudagraph_metadata_experiment_active", ""
+        )
+        if metadata_experiment_action:
+            if metadata_experiment_action == "metadata_keep":
+                self._cudagraph_metadata_experiment_hold = (
+                    attn_metadata,
+                    spec_decode_common_attn_metadata,
+                )
+                reference_state = "kept"
+            else:
+                self._cudagraph_metadata_experiment_hold = None
+                attn_metadata = None
+                spec_decode_common_attn_metadata = None
+                reference_state = "released"
+            logger.info(
+                "CUDA graph metadata ownership checkpoint: action=%s, "
+                "reference_state=%s, size=%d",
+                metadata_experiment_action,
+                reference_state,
+                num_tokens,
+            )
+            log_dummy_warmup_step(
+                f"metadata_reference_{reference_state}"
+            )
+            if is_profile and self.dynamic_eplb:
+                self.eplb_updator.adaptor.clear_all_moe_loads()
+            if not is_profile and self.dynamic_eplb:
+                self.eplb_updator.forward_end(
+                    self.eplb_heat_collection_status
+                )
+            self._finalize_dump_data(dump=False)
+            if self.use_compress and force_attention:
+                self.positions.fill_(0)
+                self._dsa_positions_cpu_buf.fill_(0)
+            log_dummy_warmup_step("metadata_only_postprocess")
+            empty_output = self.input_ids.gpu[:0]
+            return empty_output, empty_output
 
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
@@ -3669,6 +3838,21 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
+            log_dummy_warmup_step("before_model_forward")
+            module_hooks: list[Any] = []
+            max_capture_size = max(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes
+                or (),
+                default=-1,
+            )
+            if trace_dummy_warmup and num_tokens == max_capture_size:
+                trace_run = getattr(
+                    self, "_cudagraph_memory_model_trace_run", 0
+                )
+                self._cudagraph_memory_model_trace_run = trace_run + 1
+                module_hooks = self._install_dummy_model_memory_hooks(
+                    num_tokens, trace_run
+                )
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -3683,9 +3867,18 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
-                outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
-                )
+                try:
+                    outputs = self._model_forward(
+                        num_tokens_padded,
+                        input_ids,
+                        positions,
+                        intermediate_tensors,
+                        inputs_embeds,
+                    )
+                finally:
+                    for handle in module_hooks:
+                        handle.remove()
+            log_dummy_warmup_step("after_model_forward")
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
@@ -3712,6 +3905,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.use_compress and force_attention:
                 self.positions.fill_(0)
                 self._dsa_positions_cpu_buf.fill_(0)
+            log_dummy_warmup_step("after_postprocess")
             return hidden_states, hidden_states
 
     @torch.inference_mode()
@@ -3891,7 +4085,11 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -3905,7 +4103,7 @@ class NPUModelRunner(GPUModelRunner):
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
-        self.initialize_attn_backend(kv_cache_config)
+        self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any(
@@ -3931,7 +4129,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
 
-        if has_kv_transfer_group():
+        if has_kv_transfer_group() and not is_profiling:
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
         if self.model_config.enable_return_routed_experts:
@@ -4739,7 +4937,11 @@ class NPUModelRunner(GPUModelRunner):
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             )
 
-    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_attn_backend(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
         """
         Initialize the attention backends and attention metadata builders.
         """
@@ -4809,6 +5011,7 @@ class NPUModelRunner(GPUModelRunner):
         self._check_and_update_cudagraph_mode(
             attention_backend_list,
             kv_cache_config.kv_cache_groups,
+            is_profiling=is_profiling,
         )
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
@@ -4979,6 +5182,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
+        is_profiling: bool = False,
     ) -> None:
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_attn_backend = None
@@ -5004,6 +5208,7 @@ class NPUModelRunner(GPUModelRunner):
                 tensor_parallel_size=self.parallel_config.tensor_parallel_size,
                 kv_cache_config=self.kv_cache_config,
                 max_num_reqs=self.max_num_reqs,
+                is_profiling=is_profiling,
             )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
@@ -5032,10 +5237,66 @@ class NPUModelRunner(GPUModelRunner):
 
         # NOTE: Since aclgraph_batch_sizes cannot be determined until here,
         # we set the graph params right before initializing the keys.
+        # Profiling still runs real graph warmup/capture paths, so the NPU-side
+        # graph params must exist there as well.
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
+
+    def profile_cudagraph_memory(self) -> int:
+        experiment_mode = getattr(
+            self, "_cudagraph_memory_experiment_mode", ""
+        )
+        log_cleanup_steps = experiment_mode in (
+            "profile",
+            "setup_only",
+            "warmup_only",
+            "capture_only",
+            "metadata_keep",
+            "metadata_release",
+        )
+        cleanup_snapshot = None
+
+        def log_cleanup_step(step: str) -> None:
+            nonlocal cleanup_snapshot
+            if not log_cleanup_steps:
+                return
+            current_snapshot = self._cudagraph_memory_snapshot()
+            self._log_cudagraph_memory_checkpoint(
+                f"npu_cleanup_{step}", current_snapshot
+            )
+            if cleanup_snapshot is not None:
+                self._log_cudagraph_experiment_delta(
+                    f"npu_cleanup_{step}", cleanup_snapshot, current_snapshot
+                )
+            cleanup_snapshot = current_snapshot
+
+        parent_module_name = _get_gpu_model_runner_module_name(self)
+        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
+            result = GPUModelRunner.profile_cudagraph_memory(self)
+
+        log_cleanup_step("after_upstream")
+        reset_graph_params()
+        log_cleanup_step("after_reset_graph_params")
+
+        # NOTE: This is a serious problem that we maintain two extra copies of the KV cache as the instance
+        # variable of the attention layers, when they are local variables in the upstream vLLM code.
+        # We have to manually clear them here to release memory after profiling.
+        for layer in self.compilation_config.static_forward_context.values():
+            if hasattr(layer, "impl"):
+                if hasattr(layer.impl, "key_cache"):
+                    layer.impl.key_cache = None
+                if hasattr(layer.impl, "value_cache"):
+                    layer.impl.value_cache = None
+
+        log_cleanup_step("after_clear_layer_kv")
+        gc.collect()
+        log_cleanup_step("after_gc")
+        torch.accelerator.empty_cache()
+        log_cleanup_step("after_empty_cache")
+
+        return result
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
@@ -5172,16 +5433,23 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
     _encoder_mgr_orig = _vllm_encoder_cudagraph.EncoderCudaGraphManager
     _vllm_encoder_cudagraph.EncoderCudaGraphManager = EncoderAclGraphManager
     target_module = None
+    original_attrs = {}
     try:
         target_module = sys.modules[target_module_name]
+        if hasattr(target_module, "graph_capture"):
+            original_attrs["graph_capture"] = target_module.graph_capture
         setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
+        if hasattr(target_module, "CUDAGraphWrapper"):
+            original_attrs["CUDAGraphWrapper"] = target_module.CUDAGraphWrapper
+            setattr(target_module, "CUDAGraphWrapper", ACLGraphWrapper)  # noqa: B010
         yield
     except Exception as e:
         raise RuntimeError(f"NPUModelRunner failed, error is {e}")
     finally:
         _vllm_encoder_cudagraph.EncoderCudaGraphManager = _encoder_mgr_orig
         if target_module is not None:
-            setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
+            for attr_name, attr_value in original_attrs.items():
+                setattr(target_module, attr_name, attr_value)  # noqa: B010
 
 
 # TODO: remove it when flash_comm1 is removed
