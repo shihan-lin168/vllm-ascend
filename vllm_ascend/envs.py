@@ -101,9 +101,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Diagnostic ACL graph memory profiling stage. Valid values are ""
     # (disabled, default), "profile", "skip", "setup_only", "warmup_only",
-    # "capture_only", "metadata_keep", and "metadata_release". The metadata
-    # modes isolate ownership of attention metadata allocations. This is not
-    # sensitive.
+    # "capture_only", "metadata_keep", "metadata_release", and "mask_release".
+    # The metadata modes isolate ownership of attention metadata allocations;
+    # mask_release clears the cached MLA split-fuse mask after profiling. This
+    # is not sensitive.
     "VLLM_ASCEND_DEBUG_ACLGRAPH_MEMORY_EXPERIMENT": lambda: os.getenv(
         "VLLM_ASCEND_DEBUG_ACLGRAPH_MEMORY_EXPERIMENT", ""
     ),

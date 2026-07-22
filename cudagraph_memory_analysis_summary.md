@@ -998,7 +998,7 @@ D:\workspace\vllm-project\vllm-ascend\vllm_ascend\attention\mla_v1.py:689
 
 日志中还有一个名字相近的外层检查点 `after_attention_mask`。它发生在 builder 返回以后，此时 mask 已经创建，所以第 490 行为零；不能用该行否定第 486 行的 +20/+4 MiB。
 
-### 20.2 4 MiB active allocation 的所有者
+### 20.2 4 MiB active allocation 的候选所有者与证据边界
 
 `get_splitfuse_attn_mask()` 的实际实现位于：
 
@@ -1021,9 +1021,9 @@ def get_splitfuse_attn_mask(self) -> torch.Tensor:
 2048 × 2048 × sizeof(int8) = 4,194,304 bytes = 4 MiB
 ```
 
-它与第 486 行新增的 `allocated=+4.00 MiB` 精确一致。结合调用前后的细粒度检查点，可以把持续存在的 4 MiB active allocation 归到 `chunked_prefill_attn_mask`，而不是 cos/sin 缓存，也不是 `_build_attention_metadata()` 返回的 Python metadata 对象。
+它与第 486 行新增的 `allocated=+4.00 MiB` 精确一致。调用前后的细粒度检查点能够证明：这次 `get_splitfuse_attn_mask()` 调用创建了一个恰好 4 MiB 的 active tensor，并使 reserved 增加 20 MiB。
 
-该 mask 之所以在释放返回的 metadata 后仍然存在，是因为它还被长期存活的 `AttentionMaskBuilder` 缓存在 `self.chunked_prefill_attn_mask` 字段中。
+但 Round 5 没有在 profile cleanup 后清空 `AttentionMaskBuilder.chunked_prefill_attn_mask` 并重新测量，所以还不能严格证明 cleanup 后净残留的 4/20 MiB 就是同一块 mask/allocator segment。相同的净值不能排除“mask 与其他对象同时发生等量增减”的可能。长期存活的 builder 缓存字段是最强候选 owner，而不是已经完成因果验证的最终结论。
 
 ### 20.3 20 MiB reserved 的准确含义
 
@@ -1061,12 +1061,55 @@ def get_splitfuse_attn_mask(self) -> torch.Tensor:
 | `metadata_keep`，先 profile | 0 MiB | +286 MiB | `D:\workspace\vllm-project\log\round5\metadata_keep.log:781` |
 | `metadata_release`，先 profile | 0 MiB | +286 MiB | `D:\workspace\vllm-project\log\round5\metadata_release.log:779` |
 
-profile 组的正式 capture 恰好少新增 4 MiB allocated 和 20 MiB reserved。这不是最终内存减少，而是 profile 提前触发了 `get_splitfuse_attn_mask()` 的延迟初始化，使正式 capture 复用已经存在的 mask 和 allocator segment。
+profile 组的正式 capture 恰好少新增 4 MiB allocated 和 20 MiB reserved。这与“profile 提前触发 `get_splitfuse_attn_mask()` 的延迟初始化，正式 capture 随后复用缓存”的解释完全吻合，但在没有主动清除缓存的对照组之前，它仍然是时序和数值证据，不是完整的因果闭环。
 
 ### 20.5 当前结论
 
-1. 4 MiB active allocation 是 `AttentionMaskBuilder.chunked_prefill_attn_mask`，即一个 `2048 × 2048` 的 int8 NPU attention mask；
-2. 20 MiB 是首次构造该 mask 的整个调用使 caching allocator 新增的 reserved segment，其中包含 4 MiB active mask；
-3. profile 提前创建并缓存该 mask，所以后续正式 capture 的 `decode_after_attention_mask` 增量为零；
-4. `metadata_keep` 与 `metadata_release` 的结果不能证明“这不是 metadata 路径产生的”，它们证明的是“返回的 metadata 对象不是最终 owner”；真正 owner 是 metadata builder 持有的长期缓存字段；
-5. cos cache index 仍会单独触发约 2 MiB reserved，但它不是本次 4 MiB active / 20 MiB reserved 差值的主要来源。
+1. 已证明 `get_splitfuse_attn_mask()` 首次调用创建了一个 `2048 × 2048` 的 int8 NPU mask，调用区间净增加 4 MiB allocated 和 20 MiB reserved；
+2. 已证明释放 `_build_attention_metadata()` 返回的 metadata 对象不会消除 profile cleanup 后的 4/20 MiB 净残余，因此返回对象不是最终 owner；
+3. 已证明第二次调用复用了已有 mask，因为 `decode_after_attention_mask` 的四项增量均为零；
+4. 尚未证明 cleanup 后的 4/20 MiB 净残余全部属于 `chunked_prefill_attn_mask`。要完成证明，必须清空 builder 缓存字段并观察残余下降，再观察后续 warmup 重新分配；
+5. cos cache index 会单独触发约 2 MiB reserved，但它不是首次 attention-mask 调用区间内的 4/20 MiB 增量来源。
+
+### 20.6 `mask_release` 因果对照实验
+
+新增实验模式：
+
+```bash
+export VLLM_ASCEND_DEBUG_ACLGRAPH_MEMORY_EXPERIMENT=mask_release
+```
+
+该模式仍然只在 profile 阶段运行第一张 `FULL` 最大图的一次 metadata warmup，不运行 model forward 和 profile graph capture。profile cleanup 完成后，它会：
+
+1. 确认并打印 `chunked_prefill_attn_mask` 的 builder 类型、`data_ptr`、shape、dtype、device 和字节数；
+2. 将 `AttentionMaskBuilder.chunked_prefill_attn_mask` 设为 `None`；
+3. 分别在清字段、`gc.collect()`、NPU synchronize 和 `empty_cache()` 后记录内存；
+4. 继续正常的正式 warmup/capture，使 mask 有机会重新创建。
+
+需要提取的核心日志 phase/checkpoint：
+
+```text
+mla_metadata_profile_size_32_kv_0_attn_0_decode_after_attention_mask
+before_splitfuse_mask_cache_release
+splitfuse_mask_field_clear
+splitfuse_mask_gc
+splitfuse_mask_sync
+splitfuse_mask_empty_cache
+splitfuse_mask_cache_release
+mla_metadata_actual_warmup_size_32_kv_0_attn_0_decode_after_attention_mask
+capture_model_returned
+```
+
+完成因果证明需要同时看到：
+
+```text
+profile mask 日志与 release 日志：data_ptr 相同，bytes=4194304
+profile 首次创建：       allocated +4 MiB，reserved +20 MiB
+清除 mask 缓存总效果：  allocated -4 MiB，reserved 约 -20 MiB
+actual warmup 重建：     allocated +4 MiB，reserved 约 +20 MiB
+正式 capture：           不再保留先 profile 时的 4/20 MiB 增量优势
+```
+
+其中 allocated 的 -4/+4 MiB 是最关键的 ownership 证据；reserved 受 allocator segment 复用和碎片影响，可能不会每次严格等于 20 MiB，但应结合 `empty_cache()` 前后以及最终 capture 对照解释。
+
+如果没有恰好找到一个已缓存的 MLA split-fuse mask，实验会直接报错而不是继续输出无效对照结果。

@@ -587,11 +587,13 @@ class NPUWorker(WorkerBase):
             "capture_only",
             "metadata_keep",
             "metadata_release",
+            "mask_release",
         ):
             raise ValueError(
                 "VLLM_ASCEND_DEBUG_ACLGRAPH_MEMORY_EXPERIMENT must be empty, "
                 "'profile', 'skip', 'setup_only', 'warmup_only', or "
-                "'capture_only', 'metadata_keep', 'metadata_release', got "
+                "'capture_only', 'metadata_keep', 'metadata_release', or "
+                "'mask_release', got "
                 f"{aclgraph_memory_experiment!r}"
             )
         self.model_runner._cudagraph_memory_experiment_mode = (
@@ -671,6 +673,7 @@ class NPUWorker(WorkerBase):
                     "capture_only",
                     "metadata_keep",
                     "metadata_release",
+                    "mask_release",
                 ):
                     torch.npu.synchronize()
                     torch.npu.empty_cache()
@@ -700,6 +703,19 @@ class NPUWorker(WorkerBase):
                             "metadata_reference_release",
                             profile_residual_after,
                             metadata_released,
+                        )
+                    elif aclgraph_memory_experiment == "mask_release":
+                        model_runner = self.model_runner
+                        model_runner.release_cudagraph_splitfuse_mask_experiment_cache()
+                        mask_released = self._aclgraph_memory_snapshot()
+                        self._log_aclgraph_memory_checkpoint(
+                            "after_splitfuse_mask_cache_release",
+                            mask_released,
+                        )
+                        self._log_aclgraph_memory_delta(
+                            "splitfuse_mask_cache_release",
+                            profile_residual_after,
+                            mask_released,
                         )
 
         # Override torch_peak_increase with the pre-graph-capture value to

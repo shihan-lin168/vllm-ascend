@@ -3115,7 +3115,13 @@ class NPUModelRunner(GPUModelRunner):
             self.vllm_config.compilation_config.max_cudagraph_capture_size
         )
         trace_mla_metadata = (
-            experiment_mode in ("setup_only", "metadata_keep", "metadata_release")
+            experiment_mode
+            in (
+                "setup_only",
+                "metadata_keep",
+                "metadata_release",
+                "mask_release",
+            )
             and issubclass(self.attn_backend, AscendMLABackend)
             and not for_cudagraph_capture
             and max_trace_tokens is not None
@@ -3586,6 +3592,96 @@ class NPUModelRunner(GPUModelRunner):
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
 
+    def release_cudagraph_splitfuse_mask_experiment_cache(self) -> None:
+        """Release the cached MLA split-fuse mask for the ownership experiment."""
+        self._cudagraph_metadata_experiment_hold = None
+        previous_snapshot = self._cudagraph_memory_snapshot()
+        self._log_cudagraph_memory_checkpoint(
+            "before_splitfuse_mask_cache_release", previous_snapshot
+        )
+
+        seen_mask_builders: set[int] = set()
+        cleared_masks = 0
+        for kv_cache_attn_groups in self.attn_groups:
+            for attn_group in kv_cache_attn_groups:
+                for builder in attn_group.metadata_builders:
+                    mask_builder = getattr(builder, "attn_mask_builder", None)
+                    if mask_builder is None or id(mask_builder) in seen_mask_builders:
+                        continue
+                    seen_mask_builders.add(id(mask_builder))
+                    mask = getattr(
+                        mask_builder, "chunked_prefill_attn_mask", None
+                    )
+                    if mask is None:
+                        continue
+                    logger.info(
+                        "CUDA graph splitfuse mask cache release: builder=%s, "
+                        "data_ptr=%d, shape=%s, dtype=%s, device=%s, bytes=%d",
+                        type(builder).__name__,
+                        mask.data_ptr(),
+                        tuple(mask.shape),
+                        mask.dtype,
+                        mask.device,
+                        mask.numel() * mask.element_size(),
+                    )
+                    mask_builder.chunked_prefill_attn_mask = None
+                    cleared_masks += 1
+                    del mask
+
+        if cleared_masks != 1:
+            raise RuntimeError(
+                "mask_release expected exactly one cached MLA split-fuse "
+                f"mask, found {cleared_masks}"
+            )
+
+        field_clear_snapshot = self._cudagraph_memory_snapshot()
+        self._log_cudagraph_memory_checkpoint(
+            "after_splitfuse_mask_field_clear", field_clear_snapshot
+        )
+        self._log_cudagraph_experiment_delta(
+            "splitfuse_mask_field_clear",
+            previous_snapshot,
+            field_clear_snapshot,
+        )
+        previous_snapshot = field_clear_snapshot
+
+        gc.collect()
+        gc_snapshot = self._cudagraph_memory_snapshot()
+        self._log_cudagraph_memory_checkpoint(
+            "after_splitfuse_mask_gc", gc_snapshot
+        )
+        self._log_cudagraph_experiment_delta(
+            "splitfuse_mask_gc", previous_snapshot, gc_snapshot
+        )
+        previous_snapshot = gc_snapshot
+
+        torch.accelerator.synchronize()
+        sync_snapshot = self._cudagraph_memory_snapshot()
+        self._log_cudagraph_memory_checkpoint(
+            "after_splitfuse_mask_sync", sync_snapshot
+        )
+        self._log_cudagraph_experiment_delta(
+            "splitfuse_mask_sync", previous_snapshot, sync_snapshot
+        )
+        previous_snapshot = sync_snapshot
+
+        torch.accelerator.empty_cache()
+        empty_cache_snapshot = self._cudagraph_memory_snapshot()
+        self._log_cudagraph_memory_checkpoint(
+            "after_splitfuse_mask_empty_cache", empty_cache_snapshot
+        )
+        self._log_cudagraph_experiment_delta(
+            "splitfuse_mask_empty_cache",
+            previous_snapshot,
+            empty_cache_snapshot,
+        )
+        logger.info(
+            "CUDA graph splitfuse mask cache release complete: "
+            "unique_builders=%d, cleared_masks=%d",
+            len(seen_mask_builders),
+            cleared_masks,
+        )
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -3619,6 +3715,7 @@ class NPUModelRunner(GPUModelRunner):
                 "capture_only",
                 "metadata_keep",
                 "metadata_release",
+                "mask_release",
             )
             and force_attention
             and not is_profile
@@ -5344,6 +5441,7 @@ class NPUModelRunner(GPUModelRunner):
             "capture_only",
             "metadata_keep",
             "metadata_release",
+            "mask_release",
         )
         cleanup_snapshot = None
 

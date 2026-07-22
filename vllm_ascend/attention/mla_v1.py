@@ -686,6 +686,16 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         cos_view = cos[: self.num_decode_tokens, ...]
         self._trace_memory("decode_after_rope_output_views")
         decode_attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask()
+        if self._memory_trace_callback is not None:
+            logger.info(
+                "CUDA graph MLA splitfuse mask tensor: data_ptr=%d, "
+                "shape=%s, dtype=%s, device=%s, bytes=%d",
+                decode_attn_mask.data_ptr(),
+                tuple(decode_attn_mask.shape),
+                decode_attn_mask.dtype,
+                decode_attn_mask.device,
+                decode_attn_mask.numel() * decode_attn_mask.element_size(),
+            )
         self._trace_memory("decode_after_attention_mask")
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
