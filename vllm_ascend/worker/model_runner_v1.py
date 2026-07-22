@@ -105,6 +105,7 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
@@ -3600,39 +3601,25 @@ class NPUModelRunner(GPUModelRunner):
             "before_splitfuse_mask_cache_release", previous_snapshot
         )
 
-        seen_mask_builders: set[int] = set()
-        cleared_masks = 0
-        for kv_cache_attn_groups in self.attn_groups:
-            for attn_group in kv_cache_attn_groups:
-                for builder in attn_group.metadata_builders:
-                    mask_builder = getattr(builder, "attn_mask_builder", None)
-                    if mask_builder is None or id(mask_builder) in seen_mask_builders:
-                        continue
-                    seen_mask_builders.add(id(mask_builder))
-                    mask = getattr(
-                        mask_builder, "chunked_prefill_attn_mask", None
-                    )
-                    if mask is None:
-                        continue
-                    logger.info(
-                        "CUDA graph splitfuse mask cache release: builder=%s, "
-                        "data_ptr=%d, shape=%s, dtype=%s, device=%s, bytes=%d",
-                        type(builder).__name__,
-                        mask.data_ptr(),
-                        tuple(mask.shape),
-                        mask.dtype,
-                        mask.device,
-                        mask.numel() * mask.element_size(),
-                    )
-                    mask_builder.chunked_prefill_attn_mask = None
-                    cleared_masks += 1
-                    del mask
-
-        if cleared_masks != 1:
+        mask_builder = AttentionMaskBuilder(self.device)
+        mask = mask_builder.chunked_prefill_attn_mask
+        if mask is None:
             raise RuntimeError(
-                "mask_release expected exactly one cached MLA split-fuse "
-                f"mask, found {cleared_masks}"
+                "mask_release found an empty singleton MLA split-fuse mask "
+                "cache after profiling"
             )
+        logger.info(
+            "CUDA graph splitfuse mask cache release: builder=%s, "
+            "data_ptr=%d, shape=%s, dtype=%s, device=%s, bytes=%d",
+            type(mask_builder).__name__,
+            mask.data_ptr(),
+            tuple(mask.shape),
+            mask.dtype,
+            mask.device,
+            mask.numel() * mask.element_size(),
+        )
+        mask_builder.chunked_prefill_attn_mask = None
+        del mask
 
         field_clear_snapshot = self._cudagraph_memory_snapshot()
         self._log_cudagraph_memory_checkpoint(
@@ -3676,10 +3663,7 @@ class NPUModelRunner(GPUModelRunner):
             empty_cache_snapshot,
         )
         logger.info(
-            "CUDA graph splitfuse mask cache release complete: "
-            "unique_builders=%d, cleared_masks=%d",
-            len(seen_mask_builders),
-            cleared_masks,
+            "CUDA graph splitfuse singleton mask cache release complete"
         )
 
     @torch.inference_mode()
