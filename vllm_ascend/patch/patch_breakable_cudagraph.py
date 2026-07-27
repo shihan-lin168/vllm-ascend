@@ -15,14 +15,14 @@
 # limitations under the License.
 #
 
-"""Monkey-patch vLLM's eager_break_during_capture for Ascend breakable ACL graph.
+"""Install the breakable ACL graph decorator before attention modules load.
 
-``sparse_attn_indexer`` does ``from vllm.compilation.breakable_cudagraph import
-eager_break_during_capture`` — this creates a local binding at import time.
-We replace the function in the original module BEFORE ``sparse_attn_indexer`` is
-loaded, so its ``from ... import`` resolves to the Ascend variant that uses
-``BreakableACLGraphCapture`` / ``torch.npu.NPUGraph`` instead of
-``BreakableCUDAGraphCapture`` / ``torch.cuda.graph``.
+Modules such as ``attention`` and ``sparse_attn_indexer`` use
+``from vllm.compilation.breakable_cudagraph import
+eager_break_during_capture``. This creates a local binding at import time, and
+``attention`` immediately uses that binding to decorate and register its
+custom ops. Replace the function in the original module before model-runner
+imports so those bindings resolve to the Ascend implementation.
 """
 
 from vllm.compilation import breakable_cudagraph
