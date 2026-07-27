@@ -536,6 +536,11 @@ def attention_calculation_stream() -> torch.npu.Stream:
 
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
+        # Some platform patches import the attention package. Install the
+        # breakable ACL graph decorator first so attention custom ops bind and
+        # register the Ascend wrapper during module initialization.
+        import vllm_ascend.patch.patch_breakable_cudagraph  # noqa: F401
+
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401

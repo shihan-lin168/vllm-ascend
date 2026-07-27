@@ -21,12 +21,25 @@ Modules such as ``attention`` and ``sparse_attn_indexer`` use
 ``from vllm.compilation.breakable_cudagraph import
 eager_break_during_capture``. This creates a local binding at import time, and
 ``attention`` immediately uses that binding to decorate and register its
-custom ops. Replace the function in the original module before model-runner
-imports so those bindings resolve to the Ascend implementation.
+custom ops. Replace the function in the original module before global patches
+or model-runner imports so those bindings resolve to the Ascend implementation.
 """
+
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from vllm.compilation import breakable_cudagraph
 
-from vllm_ascend.compilation.breakable_aclgraph import eager_break_during_capture
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def eager_break_during_capture(fn: F) -> F:
+    """Lazily delegate decoration to the ACL graph implementation."""
+    from vllm_ascend.compilation.breakable_aclgraph import (
+        eager_break_during_capture as acl_eager_break_during_capture,
+    )
+
+    return acl_eager_break_during_capture(fn)
+
 
 breakable_cudagraph.eager_break_during_capture = eager_break_during_capture
