@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+from contextlib import contextmanager
 
 import torch
 import torch.distributed as dist
@@ -288,6 +289,20 @@ class AscendLogitsProcessor(LogitsProcessor):
     Added the feature of lmheadTP in pure dp scenario
     """
 
+    @contextmanager
+    def profile_lmhead_tp_without_collectives(self):
+        """Use shape-equivalent local tensors for LMHead TP profiling."""
+        original_value = getattr(
+            self,
+            "_profile_lmhead_tp_without_collectives",
+            False,
+        )
+        self._profile_lmhead_tp_without_collectives = True
+        try:
+            yield
+        finally:
+            self._profile_lmhead_tp_without_collectives = original_value
+
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
@@ -305,16 +320,36 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        # Gather hidden states from all devices in tensor parallel group
-        gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
-        logits = lm_head.quant_method.apply(lm_head, gathered_hidden_states, bias=embedding_bias)
+        lmhead_tp_group = get_lmhead_tp_group()
+        profile_without_collectives = getattr(
+            self,
+            "_profile_lmhead_tp_without_collectives",
+            False,
+        )
+        if profile_without_collectives:
+            # Preserve the all-gather output shape and LMHead matmul memory
+            # footprint without recording an HCCL collective in the disposable
+            # pre-KV profiling graph.
+            repeat_dims = (lmhead_tp_group.world_size,) + (1,) * (
+                hidden_states.dim() - 1
+            )
+            gathered_hidden_states = hidden_states.repeat(repeat_dims)
+        else:
+            # Gather hidden states from all devices in tensor parallel group
+            gathered_hidden_states = lmhead_tp_group.all_gather(hidden_states, dim=0)
+        logits = lm_head.quant_method.apply(
+            lm_head,
+            gathered_hidden_states,
+            bias=embedding_bias,
+        )
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
-            logits = get_lmhead_tp_group().all_to_all(logits)
+        reduce_sample = get_ascend_config().enable_reduce_sample
+        if not profile_without_collectives and not reduce_sample:
+            logits = lmhead_tp_group.all_to_all(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            if not get_ascend_config().enable_reduce_sample:
+            if not profile_without_collectives and not reduce_sample:
                 logits = logits[..., : self.org_vocab_size]
             else:
                 logits = logits[..., : lm_head.num_org_embeddings_per_partition]

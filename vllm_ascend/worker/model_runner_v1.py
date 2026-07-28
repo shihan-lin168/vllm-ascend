@@ -5043,8 +5043,30 @@ class NPUModelRunner(GPUModelRunner):
                 set_draft_graph_params(capture_sizes)
 
     def profile_cudagraph_memory(self) -> int:
+        def lmhead_tp_profile_context(model):
+            if not lmhead_tp_enable() or model is None or not hasattr(model, "compute_logits"):
+                return nullcontext()
+            logits_processor = getattr(model, "logits_processor", None)
+            if logits_processor is None:
+                logits_processor = getattr(
+                    getattr(model, "model", None),
+                    "logits_processor",
+                    None,
+                )
+            if logits_processor is None or not hasattr(
+                logits_processor,
+                "profile_lmhead_tp_without_collectives",
+            ):
+                raise RuntimeError("LMHead TP profiling requires an AscendLogitsProcessor.")
+            return logits_processor.profile_lmhead_tp_without_collectives()
+
         parent_module_name = _get_gpu_model_runner_module_name(self)
-        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
+        with (
+            _torch_cuda_wrapper(),
+            _replace_gpu_model_runner_function_wrapper(parent_module_name),
+            lmhead_tp_profile_context(self.model),
+            lmhead_tp_profile_context(getattr(self.drafter, "model", None)),
+        ):
             result = GPUModelRunner.profile_cudagraph_memory(self)
 
         reset_graph_params()
