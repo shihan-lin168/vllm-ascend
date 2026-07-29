@@ -1,45 +1,153 @@
-W0729 16:31:52.014000 94270 site-packages/torch/distributed/run.py:852] 
-W0729 16:31:52.014000 94270 site-packages/torch/distributed/run.py:852] *****************************************
-W0729 16:31:52.014000 94270 site-packages/torch/distributed/run.py:852] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
-W0729 16:31:52.014000 94270 site-packages/torch/distributed/run.py:852] *****************************************
-[16:32:00.187] rank=0 start temporary_op=local_repeat HCCL_OP_EXPANSION_MODE=AIV torch=2.10.0+cpu torch_npu=2.10.0.post2
+W0729 16:38:44.595000 94601 site-packages/torch/distributed/run.py:852] 
+W0729 16:38:44.595000 94601 site-packages/torch/distributed/run.py:852] *****************************************
+W0729 16:38:44.595000 94601 site-packages/torch/distributed/run.py:852] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0729 16:38:44.595000 94601 site-packages/torch/distributed/run.py:852] *****************************************
+[16:38:51.958] rank=1 start temporary_op=all_gather HCCL_OP_EXPANSION_MODE=AIV torch=2.10.0+cpu torch_npu=2.10.0.post2
+[16:38:52.122] rank=0 start temporary_op=all_gather HCCL_OP_EXPANSION_MODE=AIV torch=2.10.0+cpu torch_npu=2.10.0.post2
 /usr/local/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
   return func(*args, **kwargs)
-[16:32:00.538] rank=1 start temporary_op=local_repeat HCCL_OP_EXPANSION_MODE=AIV torch=2.10.0+cpu torch_npu=2.10.0.post2
-[rank0]: Traceback (most recent call last):
-[rank0]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 194, in <module>
-[rank0]:     main()
-[rank0]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 173, in main
-[rank0]:     dist.barrier()
-[rank0]:   File "/usr/local/lib/python3.11/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
-[rank0]:     return func(*args, **kwargs)
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/usr/local/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py", line 4969, in barrier
-[rank0]:     work = group.barrier(opts=opts)
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]: RuntimeError: create_config:../torch_npu/csrc/distributed/HCCLUtils.cpp:140 HCCL function error: hcclCommInitRootInfoConfig(numRanks, &rootInfo, rank, config, &(comm->hcclComm_)), error code is 7 
-[rank0]: [ERROR] 2026-07-29-16:32:01 (PID:94352, Device:0, RankID:0) ERR02200 DIST call hccl api failed.
-[rank0]: [PID: 94352] 2026-07-29-16:32:01.244.318 Communication_Error_Bind_IP_Port(EI0020): Failed to enable listening for the NPU network adapter socket. Reason: The IP address 192.42.2.199 and port 16666 have already been bound.
-[rank0]:         Solution: Check whether the single-card multi-process scenario is used. If yes, configure the port number using the environment variable HCCL_NPU_SOCKET_PORT_RANGE.
+[16:38:52.763] rank=0 eager LMHead-TP passed
+[16:38:52.763] rank=1 eager LMHead-TP passed
+[16:38:52.764] rank=0 temporary capture begin: all_gather
+[16:38:52.764] rank=1 temporary capture begin: all_gather
+[rank0]:[W729 16:38:52.696234700 NPUGraph.cpp:223] Warning: Waiting for pending NCCL work to finish before starting graph capture. (function operator())
+[rank1]:[W729 16:38:52.696867220 NPUGraph.cpp:223] Warning: Waiting for pending NCCL work to finish before starting graph capture. (function operator())
+[16:38:53.145] rank=1 temporary capture end
+[16:38:53.146] rank=0 temporary capture end
+[16:38:53.530] rank=0 temporary graph released
+[16:38:53.531] rank=0 persistent capture begin
+[16:38:53.556] rank=1 temporary graph released
+[16:38:53.557] rank=1 persistent capture begin
+[16:38:53.577] rank=0 persistent capture end
+[16:38:53.577] rank=1 persistent capture end
+[16:38:53.581] rank=0 persistent replay 1 passed
+[16:38:53.582] rank=0 persistent replay 2 passed
+[16:38:53.583] rank=0 persistent replay 3 passed
+[16:38:53.583] rank=0 persistent replay 4 passed
+[16:38:53.583] rank=0 persistent replay 5 passed
+[16:38:53.583] rank=0 persistent replay 6 passed
+[16:38:53.584] rank=0 persistent replay 7 passed
+[16:38:53.584] rank=0 persistent replay 8 passed
+[16:38:53.584] rank=0 persistent replay 9 passed
+[16:38:53.585] rank=0 persistent replay 10 passed
+[16:38:53.585] rank=0 persistent replay 11 passed
+[16:38:53.585] rank=0 persistent replay 12 passed
+[16:38:53.585] rank=0 persistent replay 13 passed
+[16:38:53.586] rank=0 persistent replay 14 passed
+[16:38:53.586] rank=0 persistent replay 15 passed
+[16:38:53.586] rank=0 persistent replay 16 passed
+[16:38:53.586] rank=0 persistent replay 17 passed
+[16:38:53.587] rank=0 persistent replay 18 passed
+[16:38:53.587] rank=0 persistent replay 19 passed
+[16:38:53.587] rank=0 persistent replay 20 passed
+[16:38:53.603] rank=1 persistent replay 1 passed
+[rank1]: Traceback (most recent call last):
+[rank1]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 179, in main
+[rank1]:     capture_and_replay_persistent_graph(
+[rank1]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 111, in capture_and_replay_persistent_graph
+[rank1]:     torch.npu.synchronize()
+[rank1]:   File "/usr/local/lib/python3.11/site-packages/torch_npu/npu/utils.py", line 72, in synchronize
+[rank1]:     return torch_npu._C._npu_synchronize()
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]: RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:576 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507011
+[rank1]: [ERROR] 2026-07-29-16:38:54 (PID:94684, Device:1, RankID:1) ERR00100 PTA call acl api failed
+[rank1]: [Error]: Model execution failed. 
+[rank1]:         Rectify the fault based on the error information in the ascend log.
+[rank1]: [PID: 94684] 2026-07-29-16:38:54.851.053 Execution_Error_SDMA(EI0012): SDMA memory copy task exception occurred. Remote rank: [0]. Base information: [streamID:[11], taskID[1], taskType[Task AIV], tag[], AlgType(level 0-1-2):[ring-ring-ring].]. Task information: [cmdType:[6], tag:[3], size:[32768], numBlocks:[8], rankSize:[2], aivRdmaStep:[-1], flagMem:[0x12c0a1a00000], isOpbase:[0]]. Communicator information: [].
+[rank1]:         Possible Cause: 1. Network connection exception occurred during the SDMA task execution. 2. The peer process exits abnormally. 3. The input or output memory address is not allocated, the actual allocated size is smaller than the input data size, or the memory is freed before the operator execution is complete.
+[rank1]:         Solution: 1. Check whether the network link is abnormal during the execution. 2. Check whether a process in the cluster exits before an error is reported. If yes, locate the cause of the process exit. 3. Check whether the size of the input/output memory passed to the communication operator meets the expectation, and whether the input/output memory or communicator is freed or destroyed before the operator execution is complete.
+[rank1]:         TraceBack (most recent call last):
+[rank1]:         The error from device(chipId:0, dieId:1), serial number is 4, there is an exception of aivec error, core id is 1, error code = 0x800000, dump info: pc start: 0x12c09f140a08, current: 0x12c09f1640d0, vec error info: 0xad00000bfe, mte error info: 0x900300017c, ifu error info: 0x217ffbe014040, ccu error info: 0xf9004a116680003f, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c100000000.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:645]
+[rank1]:         The extend info: errcode:(0x800000, 0, 0) errorStr: The DDR address of the MTE instruction is out of range. fixp_error0 info: 0x300017c, fixp_error1 info: 0x90, fsmId:0, tslot:7, thread:0, ctxid:0, blk:3, sublk:0, subErrType:4.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:658]
+[rank1]:         The error from device(chipId:0, dieId:1), serial number is 4, there is an exception of aivec error, core id is 0, error code = 0x800000, dump info: pc start: 0x12c09f140a08, current: 0x12c09f1640e4, vec error info: 0xad00000bfe, mte error info: 0x900300017c, ifu error info: 0x217ffbe014040, ccu error info: 0xf233b0586680003f, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c100000000.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:645]
+[rank1]:         The extend info: errcode:(0x800000, 0, 0) errorStr: The DDR address of the MTE instruction is out of range. fixp_error0 info: 0x300017c, fixp_error1 info: 0x90, fsmId:1, tslot:7, thread:0, ctxid:0, blk:2, sublk:0, subErrType:4.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:658]
+[rank1]:         The error from device(chipId:0, dieId:1), serial number is 4, there is an exception of aivec error, core id is 48, error code = 0x800000, dump info: pc start: 0x12c09f140a08, current: 0x12c09f1640e4, vec error info: 0xad00000cfe, mte error info: 0x900300017c, ifu error info: 0x2ffffffffff40, ccu error info: 0xbd3e5df6880003f, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c100000000.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:645]
+[rank1]:         The extend info: errcode:(0x800000, 0, 0) errorStr: The DDR address of the MTE instruction is out of range. fixp_error0 info: 0x300017c, fixp_error1 info: 0x90, fsmId:1, tslot:7, thread:0, ctxid:0, blk:0, sublk:0, subErrType:4.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:658]
+[rank1]:         The error from device(chipId:0, dieId:1), serial number is 4, there is an exception of aivec error, core id is 49, error code = 0x800000, dump info: pc start: 0x12c09f140a08, current: 0x12c09f1640e4, vec error info: 0xad00000cfe, mte error info: 0x900300017c, ifu error info: 0x217ffbe014040, ccu error info: 0xca99d98a6680003f, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c100000000.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:645]
+[rank1]:         The extend info: errcode:(0x800000, 0, 0) errorStr: The DDR address of the MTE instruction is out of range. fixp_error0 info: 0x300017c, fixp_error1 info: 0x90, fsmId:1, tslot:7, thread:0, ctxid:0, blk:1, sublk:0, subErrType:4.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:658]
+[rank1]:         SDMA memory copy task exception occurred. Remote rank: [0]. Base information: [streamID:[11], taskID[1], taskType[Task AIV], tag[], AlgType(level 0-1-2):[ring-ring-ring].]. Task information: [cmdType:[6], tag:[3], size:[32768], numBlocks:[8], rankSize:[2], aivRdmaStep:[-1], flagMem:[0x12c0a1a00000], isOpbase:[0]]. Communicator information: [].
+[rank1]:         rtDeviceSynchronizeWithTimeout execution failed, reason=the model stream execute failed[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
+[rank1]:         wait for compute device to finish failed, runtime result = 507011.[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
+
+
+[rank1]: During handling of the above exception, another exception occurred:
 
 [rank1]: Traceback (most recent call last):
 [rank1]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 194, in <module>
 [rank1]:     main()
-[rank1]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 173, in main
-[rank1]:     dist.barrier()
-[rank1]:   File "/usr/local/lib/python3.11/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
-[rank1]:     return func(*args, **kwargs)
-[rank1]:            ^^^^^^^^^^^^^^^^^^^^^
-[rank1]:   File "/usr/local/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py", line 4969, in barrier
-[rank1]:     work = group.barrier(opts=opts)
-[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^
-[rank1]: RuntimeError: create_config:../torch_npu/csrc/distributed/HCCLUtils.cpp:140 HCCL function error: hcclCommInitRootInfoConfig(numRanks, &rootInfo, rank, config, &(comm->hcclComm_)), error code is 7 
-[rank1]: [ERROR] 2026-07-29-16:32:01 (PID:94353, Device:1, RankID:1) ERR02200 DIST call hccl api failed.
-[rank1]: [PID: 94353] 2026-07-29-16:32:01.337.768 Communication_Error_Bind_IP_Port(EI0020): Failed to enable listening for the NPU network adapter socket. Reason: The IP address 192.42.3.198 and port 16666 have already been bound.
-[rank1]:         Solution: Check whether the single-card multi-process scenario is used. If yes, configure the port number using the environment variable HCCL_NPU_SOCKET_PORT_RANGE.
+[rank1]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 190, in main
+[rank1]:     dist.destroy_process_group()
+[rank1]:   File "/usr/local/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py", line 2264, in destroy_process_group
+[rank1]:     pg_to_shutdown.shutdown()
+[rank1]: RuntimeError: synchronize:../torch_npu/csrc/core/npu/NPUStream.cpp:361 NPU function error: c10_npu::acl::AclrtSynchronizeStreamWithTimeout(stream()), error code is 507011
+[rank1]: [ERROR] 2026-07-29-16:38:54 (PID:94684, Device:1, RankID:1) ERR00100 PTA call acl api failed
+[rank1]: [Error]: Model execution failed. 
+[rank1]:         Rectify the fault based on the error information in the ascend log.
+[rank1]: EE9999: Inner Error!
+[rank1]: EE9999[PID: 94684] 2026-07-29-16:38:54.853.436 (EE9999):  rtStreamSynchronizeWithTimeout execution failed, reason=the model stream execute failed[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
+[rank1]:         TraceBack (most recent call last):
+[rank1]:        synchronize stream with timeout failed, runtime result = 507011[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
 
-W0729 16:32:06.665000 94270 site-packages/torch/distributed/elastic/multiprocessing/api.py:1010] Sending process 94353 closing signal SIGTERM
-E0729 16:32:06.729000 94270 site-packages/torch/distributed/elastic/multiprocessing/api.py:984] failed (exitcode: 1) local_rank: 0 (pid: 94352) of binary: /usr/local/bin/python3.11
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 187, in main
+[rank0]:     dist.barrier()
+[rank0]:   File "/usr/local/lib/python3.11/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank0]:     return func(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py", line 4976, in barrier
+[rank0]:     work.wait()
+[rank0]: RuntimeError: npuSynchronizeDevice:../torch_npu/csrc/core/npu/NPUStream.cpp:576 NPU function error: AclrtSynchronizeDeviceWithTimeout, error code is 507035
+[rank0]: [ERROR] 2026-07-29-16:38:56 (PID:94683, Device:0, RankID:0) ERR00100 PTA call acl api failed
+[rank0]: [Error]: The vector core execution is abnormal. 
+[rank0]:         Rectify the fault based on the error information in the ascend log.
+[rank0]: [PID: 94683] 2026-07-29-16:38:56.111.633 Execution_Error_SDMA(EI0012): SDMA memory copy task exception occurred. Remote rank: [0]. Base information: [streamID:[44], taskID[23], taskType[Task AIV], tag[AllReduce_group_name_0], AlgType(level 0-1-2):[ring-ring-ring].]. Task information: [cmdType:[2], tag:[5], size:[4], numBlocks:[2], rankSize:[2], aivRdmaStep:[-1], flagMem:[0x12c09e200000], isOpbase:[1]]. Communicator information: [].
+[rank0]:         Possible Cause: 1. Network connection exception occurred during the SDMA task execution. 2. The peer process exits abnormally. 3. The input or output memory address is not allocated, the actual allocated size is smaller than the input data size, or the memory is freed before the operator execution is complete.
+[rank0]:         Solution: 1. Check whether the network link is abnormal during the execution. 2. Check whether a process in the cluster exits before an error is reported. If yes, locate the cause of the process exit. 3. Check whether the size of the input/output memory passed to the communication operator meets the expectation, and whether the input/output memory or communicator is freed or destroyed before the operator execution is complete.
+[rank0]:         TraceBack (most recent call last):
+[rank0]:         The error from device(chipId:0, dieId:0), serial number is 4, there is an exception of aivec error, core id is 44, error code = 0x800000, dump info: pc start: 0x12c09e8ba184, current: 0x12c09e920cf4, vec error info: 0xad00000cfe, mte error info: 0x8303000181, ifu error info: 0x20003c01c2800, ccu error info: 0x11490956880003f, cube error info: 0, biu error info: 0, aic error mask: 0x6500020bd00028c, para base: 0x12c100a05c00.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:645]
+[rank0]:         The extend info: errcode:(0x800000, 0, 0) errorStr: The DDR address of the MTE instruction is out of range. fixp_error0 info: 0x3000181, fixp_error1 info: 0x83, fsmId:0, tslot:1, thread:0, ctxid:0, blk:1, sublk:0, subErrType:4.[FUNC:PrintCoreInfo][FILE:device_error_core_proc.cc][LINE:658]
+[rank0]:         Kernel task happen error, retCode=0x31, [vector core exception].[FUNC:PreCheckTaskErr][FILE:davinci_kernel_task.cc][LINE:1729]
+[rank0]:         SDMA memory copy task exception occurred. Remote rank: [0]. Base information: [streamID:[44], taskID[23], taskType[Task AIV], tag[AllReduce_group_name_0], AlgType(level 0-1-2):[ring-ring-ring].]. Task information: [cmdType:[2], tag:[5], size:[4], numBlocks:[2], rankSize:[2], aivRdmaStep:[-1], flagMem:[0x12c09e200000], isOpbase:[1]]. Communicator information: [].
+[rank0]:         rtDeviceSynchronizeWithTimeout execution failed, reason=vector core exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
+[rank0]:         wait for compute device to finish failed, runtime result = 507035.[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
+
+
+[rank0]: During handling of the above exception, another exception occurred:
+
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 194, in <module>
+[rank0]:     main()
+[rank0]:   File "/home/l00838859/cann/vllm-runner/demo.py", line 190, in main
+[rank0]:     dist.destroy_process_group()
+[rank0]:   File "/usr/local/lib/python3.11/site-packages/torch/distributed/distributed_c10d.py", line 2264, in destroy_process_group
+[rank0]:     pg_to_shutdown.shutdown()
+[rank0]: RuntimeError: synchronize:../torch_npu/csrc/core/npu/NPUStream.cpp:361 NPU function error: c10_npu::acl::AclrtSynchronizeStreamWithTimeout(stream()), error code is 507035
+[rank0]: [ERROR] 2026-07-29-16:38:56 (PID:94683, Device:0, RankID:0) ERR00100 PTA call acl api failed
+[rank0]: [Error]: The vector core execution is abnormal. 
+[rank0]:         Rectify the fault based on the error information in the ascend log.
+[rank0]: EE9999: Inner Error!
+[rank0]: EE9999[PID: 94683] 2026-07-29-16:38:56.114.308 (EE9999):  rtStreamSynchronizeWithTimeout execution failed, reason=vector core exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
+[rank0]:         TraceBack (most recent call last):
+[rank0]:        synchronize stream with timeout failed, runtime result = 507035[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
+
+[rank0]:[W729 16:38:56.047656350 NPUStream.cpp:596] Warning: NPU warning, error code is 507035[Error]: 
+[Error]: The vector core execution is abnormal. 
+        Rectify the fault based on the error information in the ascend log.
+EE9999: Inner Error!
+EE9999[PID: 94683] 2026-07-29-16:38:56.117.137 (EE9999):  rtDeviceSynchronizeWithTimeout execution failed, reason=vector core exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
+        TraceBack (most recent call last):
+       wait for compute device to finish failed, runtime result = 507035.[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
+ (function npuSynchronizeUsedDevices)
+[W729 16:38:56.048499050 NPUStream.cpp:578] Warning: NPU warning, error code is 507035[Error]: 
+[Error]: The vector core execution is abnormal. 
+        Rectify the fault based on the error information in the ascend log.
+EE9999: Inner Error!
+EE9999[PID: 94683] 2026-07-29-16:38:56.118.019 (EE9999):  rtDeviceSynchronizeWithTimeout execution failed, reason=vector core exception[FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:65]
+        TraceBack (most recent call last):
+       wait for compute device to finish failed, runtime result = 507035.[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:148]
+ (function npuSynchronizeDevice)
+W0729 16:39:01.468000 94601 site-packages/torch/distributed/elastic/multiprocessing/api.py:1010] Sending process 94683 closing signal SIGTERM
+E0729 16:39:01.682000 94601 site-packages/torch/distributed/elastic/multiprocessing/api.py:984] failed (exitcode: 1) local_rank: 1 (pid: 94684) of binary: /usr/local/bin/python3.11
 Traceback (most recent call last):
   File "/usr/local/bin/torchrun", line 6, in <module>
     sys.exit(main())
@@ -62,20 +170,20 @@ demo.py FAILED
 ------------------------------------------------------------
 Failures:
 [1]:
-  time      : 2026-07-29_16:32:06
+  time      : 2026-07-29_16:39:01
   host      : worker-97-44
-  rank      : 1 (local_rank: 1)
-  exitcode  : 1 (pid: 94353)
+  rank      : 0 (local_rank: 0)
+  exitcode  : -15 (pid: 94683)
   error_file: <N/A>
-  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+  traceback : Signal 15 (SIGTERM) received by PID 94683
 ------------------------------------------------------------
 Root Cause (first observed failure):
 [0]:
-  time      : 2026-07-29_16:32:06
+  time      : 2026-07-29_16:39:01
   host      : worker-97-44
-  rank      : 0 (local_rank: 0)
-  exitcode  : 1 (pid: 94352)
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 94684)
   error_file: <N/A>
   traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
 ============================================================
-[ERROR] 2026-07-29-16:32:06 (PID:94270, Device:-1, RankID:-1) ERR99999 UNKNOWN applicaiton exception
+[ERROR] 2026-07-29-16:39:01 (PID:94601, Device:-1, RankID:-1) ERR99999 UNKNOWN applicaiton exception
