@@ -1,0 +1,64 @@
+W0730 10:04:51.520000 130130 site-packages/torch/distributed/run.py:852] 
+W0730 10:04:51.520000 130130 site-packages/torch/distributed/run.py:852] *****************************************
+W0730 10:04:51.520000 130130 site-packages/torch/distributed/run.py:852] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0730 10:04:51.520000 130130 site-packages/torch/distributed/run.py:852] *****************************************
+[10:05:08.025] rank=1 start temporary_op=all_gather HCCL_OP_EXPANSION_MODE=AIV torch=2.10.0+cpu torch_npu=2.10.0.post2
+[10:05:08.110] rank=0 start temporary_op=all_gather HCCL_OP_EXPANSION_MODE=AIV torch=2.10.0+cpu torch_npu=2.10.0.post2
+/usr/local/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[10:05:08.788] rank=1 eager LMHead-TP passed
+[10:05:08.788] rank=0 eager LMHead-TP passed
+[10:05:08.789] rank=0 temporary capture begin: all_gather
+[10:05:08.789] rank=1 temporary capture begin: all_gather
+[rank0]:[W730 10:05:08.721762140 NPUGraph.cpp:223] Warning: Waiting for pending NCCL work to finish before starting graph capture. (function operator())
+[rank1]:[W730 10:05:08.722293500 NPUGraph.cpp:223] Warning: Waiting for pending NCCL work to finish before starting graph capture. (function operator())
+[10:05:09.128] rank=1 temporary capture end[10:05:09.128] rank=0 temporary capture end
+
+[10:05:09.474] rank=0 temporary graph released
+[10:05:09.475] rank=0 persistent capture begin
+[10:05:09.491] rank=1 temporary graph released
+[10:05:09.492] rank=1 persistent capture begin
+[10:05:09.505] rank=0 persistent capture end
+[10:05:09.506] rank=1 persistent capture end
+[10:05:09.511] rank=0 persistent replay 1 passed
+[10:05:09.512] rank=1 persistent replay 1 passed
+[10:05:09.512] rank=0 persistent replay 2 passed
+[10:05:09.512] rank=0 persistent replay 3 passed
+[10:05:09.512] rank=1 persistent replay 2 passed
+[10:05:09.512] rank=0 persistent replay 4 passed
+[10:05:09.512] rank=1 persistent replay 3 passed
+[10:05:09.513] rank=0 persistent replay 5 passed
+[10:05:09.513] rank=1 persistent replay 4 passed
+[10:05:09.513] rank=0 persistent replay 6 passed
+[10:05:09.513] rank=1 persistent replay 5 passed
+[10:05:09.513] rank=0 persistent replay 7 passed
+[10:05:09.513] rank=1 persistent replay 6 passed
+[10:05:09.513] rank=0 persistent replay 8 passed
+[10:05:09.513] rank=1 persistent replay 7 passed
+[10:05:09.514] rank=0 persistent replay 9 passed
+[10:05:09.514] rank=1 persistent replay 8 passed
+[10:05:09.514] rank=0 persistent replay 10 passed
+[10:05:09.514] rank=1 persistent replay 9 passed
+[10:05:09.514] rank=0 persistent replay 11 passed
+[10:05:09.514] rank=1 persistent replay 10 passed
+[10:05:09.514] rank=0 persistent replay 12 passed
+[10:05:09.514] rank=1 persistent replay 11 passed
+[10:05:09.514] rank=0 persistent replay 13 passed
+[10:05:09.514] rank=1 persistent replay 12 passed
+[10:05:09.515] rank=0 persistent replay 14 passed
+[10:05:09.515] rank=1 persistent replay 13 passed
+[10:05:09.515] rank=0 persistent replay 15 passed
+[10:05:09.515] rank=1 persistent replay 14 passed
+[10:05:09.515] rank=0 persistent replay 16 passed
+[10:05:09.515] rank=1 persistent replay 15 passed
+[10:05:09.515] rank=0 persistent replay 17 passed
+[10:05:09.515] rank=1 persistent replay 16 passed
+[10:05:09.516] rank=0 persistent replay 18 passed
+[10:05:09.516] rank=1 persistent replay 17 passed
+[10:05:09.516] rank=0 persistent replay 19 passed
+[10:05:09.516] rank=1 persistent replay 18 passed
+[10:05:09.516] rank=0 persistent replay 20 passed
+[10:05:09.516] rank=1 persistent replay 19 passed
+[10:05:09.516] rank=1 persistent replay 20 passed
+[10:05:09.518] rank=0 PASS
+[10:05:09.518] rank=1 PASS
