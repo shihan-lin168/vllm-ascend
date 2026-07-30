@@ -7,7 +7,6 @@ import argparse
 import gc
 import os
 from datetime import datetime
-from time import sleep
 
 import torch
 import torch.distributed as dist
@@ -15,10 +14,12 @@ import torch_npu
 
 
 WORLD_SIZE = 4
+MODEL_TP_GROUP_RANKS = ((0, 1), (2, 3))
 LMHEAD_TP_SIZE = 2
 LMHEAD_TP_GROUP_RANKS = ((0, 2), (1, 3))
-TOKENS_PER_RANK = 16
-HIDDEN_SIZE = 1024
+MODEL_TOKENS = 3
+LMHEAD_TOKENS_PER_RANK = 16
+HIDDEN_SIZE = 7168
 VOCAB_SHARD_SIZE = 2048
 LMHEAD_CALLS_PER_GRAPH = 2
 
@@ -28,28 +29,30 @@ def log(rank: int, message: str) -> None:
     print(f"[{now}] rank={rank} {message}", flush=True)
 
 
-def make_hidden_states(rank: int) -> torch.Tensor:
+def make_hidden_states(rank: int, num_tokens: int) -> torch.Tensor:
     return torch.full(
-        (TOKENS_PER_RANK, HIDDEN_SIZE),
+        (num_tokens, HIDDEN_SIZE),
         float(rank + 1),
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
         device="npu",
     )
 
 
-def init_lmhead_tp_group(
+def init_tp_group(
     rank: int,
+    tp_group_ranks: tuple[tuple[int, ...], ...],
+    group_name: str,
 ) -> tuple[dist.ProcessGroup, tuple[int, ...]]:
     rank_group = None
     rank_group_ranks = None
-    for group_ranks in LMHEAD_TP_GROUP_RANKS:
+    for group_ranks in tp_group_ranks:
         group = dist.new_group(ranks=list(group_ranks), backend="hccl")
         if rank in group_ranks:
             rank_group = group
             rank_group_ranks = group_ranks
 
     if rank_group is None or rank_group_ranks is None:
-        raise RuntimeError(f"rank {rank} is not in an LMHead TP group")
+        raise RuntimeError(f"rank {rank} is not in a {group_name} group")
     return rank_group, rank_group_ranks
 
 
@@ -63,7 +66,10 @@ def lmhead_tp(
     for _ in range(LMHEAD_CALLS_PER_GRAPH):
         if temporary_op == "all_gather":
             gathered_hidden_states = torch.empty(
-                (LMHEAD_TP_SIZE * TOKENS_PER_RANK, HIDDEN_SIZE),
+                (
+                    LMHEAD_TP_SIZE * hidden_states.shape[0],
+                    hidden_states.shape[1],
+                ),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
@@ -80,29 +86,57 @@ def lmhead_tp(
     return logits
 
 
+def graph_workload(
+    model_hidden_states: torch.Tensor,
+    lmhead_hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    lmhead_op: str,
+    model_tp_group: dist.ProcessGroup,
+    lmhead_tp_group: dist.ProcessGroup,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    reduced_hidden_states = model_hidden_states.clone()
+    dist.all_reduce(reduced_hidden_states, group=model_tp_group)
+    logits = lmhead_tp(
+        lmhead_hidden_states,
+        weight,
+        lmhead_op,
+        lmhead_tp_group,
+    )
+    return reduced_hidden_states, logits
+
+
 def capture_and_release_temporary_graph(
     rank: int,
     weight: torch.Tensor,
     temporary_op: str,
+    model_tp_group: dist.ProcessGroup,
     lmhead_tp_group: dist.ProcessGroup,
 ) -> None:
-    hidden_states = make_hidden_states(rank)
+    model_hidden_states = make_hidden_states(rank, MODEL_TOKENS)
+    lmhead_hidden_states = make_hidden_states(
+        rank,
+        LMHEAD_TOKENS_PER_RANK,
+    )
     graph_pool = torch.npu.graph_pool_handle()
     graph = torch.npu.NPUGraph()
 
     log(rank, f"temporary capture begin: {temporary_op}")
     with torch.npu.graph(graph, pool=graph_pool):
-        logits = lmhead_tp(
-            hidden_states,
+        reduced_hidden_states, logits = graph_workload(
+            model_hidden_states,
+            lmhead_hidden_states,
             weight,
             temporary_op,
+            model_tp_group,
             lmhead_tp_group,
         )
     torch.npu.synchronize()
     log(rank, "temporary capture end")
 
+    del reduced_hidden_states
     del logits
-    del hidden_states
+    del model_hidden_states
+    del lmhead_hidden_states
     del graph_pool
     del graph
     gc.collect()
@@ -114,38 +148,48 @@ def capture_and_release_temporary_graph(
 def capture_and_replay_persistent_graph(
     rank: int,
     weight: torch.Tensor,
+    reference_reduced_hidden_states: torch.Tensor,
     reference_logits: list[torch.Tensor],
     replays: int,
-    rank1_replay_delay_ms: int,
+    model_tp_group: dist.ProcessGroup,
     lmhead_tp_group: dist.ProcessGroup,
-    lmhead_tp_group_rank: int,
 ) -> None:
-    hidden_states = make_hidden_states(rank)
+    model_hidden_states = make_hidden_states(rank, MODEL_TOKENS)
+    lmhead_hidden_states = make_hidden_states(
+        rank,
+        LMHEAD_TOKENS_PER_RANK,
+    )
     graph_pool = torch.npu.graph_pool_handle()
     graph = torch.npu.NPUGraph()
 
     log(rank, "persistent capture begin")
     with torch.npu.graph(graph, pool=graph_pool):
-        logits = lmhead_tp(
-            hidden_states,
+        reduced_hidden_states, logits = graph_workload(
+            model_hidden_states,
+            lmhead_hidden_states,
             weight,
             "all_gather",
+            model_tp_group,
             lmhead_tp_group,
         )
     torch.npu.synchronize()
     log(rank, "persistent capture end")
 
-    if lmhead_tp_group_rank == 1 and rank1_replay_delay_ms:
-        log(
-            rank,
-            "delaying LMHead TP group rank 1 persistent replay by "
-            f"{rank1_replay_delay_ms} ms",
-        )
-        sleep(rank1_replay_delay_ms / 1000)
-
     for replay_index in range(replays):
         graph.replay()
         torch.npu.synchronize()
+        if not torch.equal(
+            reduced_hidden_states,
+            reference_reduced_hidden_states,
+        ):
+            max_diff = (
+                reduced_hidden_states.float()
+                - reference_reduced_hidden_states.float()
+            ).abs().max().item()
+            raise RuntimeError(
+                f"persistent replay {replay_index + 1} all-reduce mismatch: "
+                f"max_abs_diff={max_diff}"
+            )
         for actual, expected in zip(logits, reference_logits, strict=True):
             if not torch.equal(actual, expected):
                 max_diff = (actual.float() - expected.float()).abs().max().item()
@@ -159,17 +203,27 @@ def capture_and_replay_persistent_graph(
 def eager_reference(
     rank: int,
     weight: torch.Tensor,
+    model_tp_group: dist.ProcessGroup,
     lmhead_tp_group: dist.ProcessGroup,
-) -> list[torch.Tensor]:
-    hidden_states = make_hidden_states(rank)
-    logits = lmhead_tp(
-        hidden_states,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    model_hidden_states = make_hidden_states(rank, MODEL_TOKENS)
+    lmhead_hidden_states = make_hidden_states(
+        rank,
+        LMHEAD_TOKENS_PER_RANK,
+    )
+    reduced_hidden_states, logits = graph_workload(
+        model_hidden_states,
+        lmhead_hidden_states,
         weight,
         "all_gather",
+        model_tp_group,
         lmhead_tp_group,
     )
     torch.npu.synchronize()
-    return [tensor.clone() for tensor in logits]
+    return (
+        reduced_hidden_states.clone(),
+        [tensor.clone() for tensor in logits],
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -180,12 +234,9 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--replays", type=int, default=20)
-    parser.add_argument("--rank1-replay-delay-ms", type=int, default=0)
     args = parser.parse_args()
     if args.replays <= 0:
         parser.error("--replays must be greater than zero")
-    if args.rank1_replay_delay_ms < 0:
-        parser.error("--rank1-replay-delay-ms must be non-negative")
     return args
 
 
@@ -200,17 +251,22 @@ def main() -> None:
     torch.npu.set_device(local_rank)
     dist.init_process_group("hccl")
     try:
-        lmhead_tp_group, lmhead_tp_group_ranks = init_lmhead_tp_group(
-            rank
+        model_tp_group, model_tp_group_ranks = init_tp_group(
+            rank,
+            MODEL_TP_GROUP_RANKS,
+            "model TP",
         )
-        lmhead_tp_group_rank = lmhead_tp_group_ranks.index(rank)
+        lmhead_tp_group, lmhead_tp_group_ranks = init_tp_group(
+            rank,
+            LMHEAD_TP_GROUP_RANKS,
+            "LMHead TP",
+        )
         log(
             rank,
             (
                 f"start temporary_op={args.temporary_op} "
-                f"rank1_replay_delay_ms={args.rank1_replay_delay_ms} "
+                f"model_tp_group={model_tp_group_ranks} "
                 f"lmhead_tp_group={lmhead_tp_group_ranks} "
-                f"lmhead_tp_group_rank={lmhead_tp_group_rank} "
                 f"HCCL_OP_EXPANSION_MODE="
                 f"{os.getenv('HCCL_OP_EXPANSION_MODE', '<unset>')} "
                 f"torch={torch.__version__} "
@@ -221,33 +277,35 @@ def main() -> None:
         torch.manual_seed(rank)
         weight = torch.randn(
             (VOCAB_SHARD_SIZE, HIDDEN_SIZE),
-            dtype=torch.float16,
+            dtype=torch.bfloat16,
             device="npu",
         )
 
         dist.barrier()
-        reference_logits = eager_reference(
+        reference_reduced_hidden_states, reference_logits = eager_reference(
             rank,
             weight,
+            model_tp_group,
             lmhead_tp_group,
         )
         dist.barrier()
-        log(rank, "eager LMHead-TP passed")
+        log(rank, "eager model-TP and LMHead-TP passed")
 
         capture_and_release_temporary_graph(
             rank,
             weight,
             args.temporary_op,
+            model_tp_group,
             lmhead_tp_group,
         )
         capture_and_replay_persistent_graph(
             rank,
             weight,
+            reference_reduced_hidden_states,
             reference_logits,
             args.replays,
-            args.rank1_replay_delay_ms,
+            model_tp_group,
             lmhead_tp_group,
-            lmhead_tp_group_rank,
         )
 
         torch.npu.synchronize()
