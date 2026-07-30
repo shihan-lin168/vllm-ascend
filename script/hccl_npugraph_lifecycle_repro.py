@@ -77,13 +77,12 @@ def capture_graph_set(
     rank: int,
     weight: torch.Tensor,
     op: str,
+    graph_pool: object,
 ) -> tuple[
-    object,
     list[torch.npu.NPUGraph],
     list[torch.Tensor],
     list[list[torch.Tensor]],
 ]:
-    graph_pool = torch.npu.graph_pool_handle()
     graphs = []
     inputs = []
     outputs = []
@@ -101,7 +100,7 @@ def capture_graph_set(
         inputs.append(hidden_states)
         outputs.append(logits)
 
-    return graph_pool, graphs, inputs, outputs
+    return graphs, inputs, outputs
 
 
 def capture_and_release_temporary_graphs(
@@ -109,16 +108,18 @@ def capture_and_release_temporary_graphs(
     weight: torch.Tensor,
     temporary_op: str,
 ) -> None:
-    graph_pool, graphs, inputs, outputs = capture_graph_set(
+    profiling_pool = torch.npu.graph_pool_handle()
+    graphs, inputs, outputs = capture_graph_set(
         rank,
         weight,
         temporary_op,
+        profiling_pool,
     )
 
     del outputs
     del inputs
     del graphs
-    del graph_pool
+    del profiling_pool
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.synchronize()
@@ -130,11 +131,13 @@ def capture_and_replay_persistent_graphs(
     weight: torch.Tensor,
     references: list[list[torch.Tensor]],
     replays: int,
+    persistent_pool: object,
 ) -> None:
-    graph_pool, graphs, inputs, outputs = capture_graph_set(
+    graphs, inputs, outputs = capture_graph_set(
         rank,
         weight,
         "all_gather",
+        persistent_pool,
     )
 
     for replay_index in range(replays):
@@ -207,6 +210,8 @@ def main() -> None:
             dtype=torch.bfloat16,
             device="npu",
         )
+        persistent_pool = torch.npu.graph_pool_handle()
+        log(rank, "persistent graph pool created")
 
         dist.barrier()
         references = eager_references(rank, weight)
@@ -223,6 +228,7 @@ def main() -> None:
             weight,
             references,
             args.replays,
+            persistent_pool,
         )
 
         torch.npu.synchronize()
