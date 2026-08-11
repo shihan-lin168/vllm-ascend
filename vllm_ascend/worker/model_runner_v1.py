@@ -339,6 +339,13 @@ class NPUModelRunner(GPUModelRunner):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
+        if lmhead_tp_enable():
+            self.logits_indices_padded = torch.zeros(
+                self.max_num_reqs * self.uniform_decode_query_len,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
 
@@ -1280,8 +1287,10 @@ class NPUModelRunner(GPUModelRunner):
             assert np.sum(num_sampled_tokens) <= self.vllm_config.scheduler_config.max_num_batched_tokens
             self.set_active_loras(self.input_batch, num_scheduled_tokens, num_sampled_tokens)
         if lmhead_tp_enable():
-            max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
-            logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+            cur_len = logits_indices.shape[0]
+            self.logits_indices_padded[:cur_len].copy_(logits_indices, non_blocking=True)
+            self.logits_indices_padded[cur_len:].zero_()
+            logits_indices = self.logits_indices_padded
 
         return (
             logits_indices,
