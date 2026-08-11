@@ -561,7 +561,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         # init block table tensor clone is only available after profile run and is only used for graph mode
-        if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
+        if self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
             self.block_table_tensor_clone = torch.zeros(
                 (
                     self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
@@ -866,7 +866,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
             slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
-            common_attn_metadata.block_table_tensor = self._adjust_tensor(
+            common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
             if self.method == "dflash":
@@ -894,7 +894,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
             # We need to unpad here for eager mode to maintain compatibility.
             if not self.vllm_config.model_config.use_mla and self.dcp_size == 1:
-                common_attn_metadata.block_table_tensor = self._adjust_tensor(
+                common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
@@ -946,12 +946,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # FIXME(lilinsiman)
         if self.dcp_size > 1 and self.use_cuda_graph:
             assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-            self.block_table_tensor_clone[: common_attn_metadata.block_table_tensor.shape[0]] = (
-                common_attn_metadata.block_table_tensor
-            )
-            common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[
-                : common_attn_metadata.block_table_tensor.shape[0]
-            ]
+            src = common_attn_metadata.block_table_tensor
+            n = src.shape[0]
+            if src.data_ptr() != self.block_table_tensor_clone.data_ptr():
+                self.block_table_tensor_clone[:n].copy_(src, non_blocking=True)
+            common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:n]
         else:
             common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
@@ -1546,7 +1545,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 common_attn_metadata.num_reqs = input_batch_size
-                common_attn_metadata.block_table_tensor = self._adjust_tensor(
+                common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                     common_attn_metadata.block_table_tensor, input_batch_size
                 )
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, input_batch_size)
@@ -2057,6 +2056,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             tensor = tensor[:desired_size]
         return tensor
+
+    def _adjust_block_table_tensor(self, tensor, desired_size):
+        if self.block_table_tensor_clone is None or desired_size > self.block_table_tensor_clone.shape[0]:
+            return self._adjust_tensor(tensor, desired_size)
+        buf = self.block_table_tensor_clone
+        if tensor.data_ptr() == buf.data_ptr():
+            if desired_size > tensor.shape[0]:
+                buf[tensor.shape[0] : desired_size].zero_()
+            return buf[:desired_size]
+        cur = tensor.shape[0]
+        if desired_size >= cur:
+            buf[:cur].copy_(tensor, non_blocking=True)
+            buf[cur:desired_size].zero_()
+        else:
+            buf[:desired_size].copy_(tensor[:desired_size], non_blocking=True)
+        return buf[:desired_size]
 
     def maybe_pad_and_reduce(
         self,
