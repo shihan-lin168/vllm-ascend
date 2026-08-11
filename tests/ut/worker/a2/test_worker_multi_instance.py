@@ -18,6 +18,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from vllm.config import CUDAGraphMode
 from vllm.utils.mem_constants import GiB_bytes
 
 from tests.ut.base import TestBase
@@ -50,6 +51,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         worker.vllm_config = SimpleNamespace(kv_transfer_config=None)
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
+
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        worker.vllm_config = mock_vllm_config
 
         mock_cache_config = MagicMock()
         mock_cache_config.kv_cache_memory_bytes = None
@@ -147,7 +152,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         non_kv_cache = int(1 * GiB_bytes)
 
         worker = self._make_worker(requested_memory, init_free, total)
-        worker.model_runner.profile_cudagraph_memory = MagicMock()
+        worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        worker.model_config.hf_config.model_type = "deepseek_v4"
+        worker.model_runner.use_compress = True
+        worker.model_runner.profile_cudagraph_memory.return_value = int(2 * GiB_bytes)
         profile_result = self._make_profile_result(
             free_memory_after=init_free - non_kv_cache,
             non_kv_cache_memory=non_kv_cache,
