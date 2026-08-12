@@ -870,9 +870,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor, slicing_length
             )
             if self.method == "dflash":
-                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens = self._adjust_tensor_into_buf(
+                    common_attn_metadata.seq_lens, num_reqs_padded, self.seq_lens_group[0]
+                )
             else:
-                common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens = self._adjust_tensor_into_buf(
+                    self.runner.seq_lens, num_reqs_padded, self.seq_lens_group[0]
+                )
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     self.runner.optimistic_seq_lens_cpu, num_reqs_padded
                 )
@@ -921,7 +925,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
 
-        self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
+        if common_attn_metadata.seq_lens.data_ptr() != self.seq_lens_group[0].data_ptr():
+            self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
         self.seq_lens_group[0][num_reqs_padded:].fill_(0)
         common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs_padded]
 
@@ -1548,7 +1553,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                     common_attn_metadata.block_table_tensor, input_batch_size
                 )
-                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, input_batch_size)
+                common_attn_metadata.seq_lens = self._adjust_tensor_into_buf(
+                    common_attn_metadata.seq_lens, input_batch_size, self.seq_lens_group[draft_index]
+                )
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     common_attn_metadata.seq_lens_cpu, input_batch_size
                 )
@@ -1593,10 +1600,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # The loop part
         used_update_positions += 1
 
-        # Clone the data so that when calculating the data at position 2 and position 3
-        # in the merged graph, it does not affect position 1
+        # Isolate per-step data so that when calculating the data at position
+        # 2 and position 3 in the merged graph, it does not affect position 1.
+        # GPU seq_lens is written directly into its persistent per-step buffer
+        # (so the in-place +=1 below lands on the target memory); the CPU
+        # mirrors still need their own clones as they have no group buffers.
         # FIXME(lilinsiman)
-        common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
+        seq_lens_n = common_attn_metadata.seq_lens.shape[0]
+        seq_lens_buf = self.seq_lens_group[draft_index]
+        if common_attn_metadata.seq_lens.data_ptr() != seq_lens_buf.data_ptr():
+            seq_lens_buf[:seq_lens_n].copy_(common_attn_metadata.seq_lens, non_blocking=True)
+        seq_lens_buf[seq_lens_n:].fill_(0)
+        common_attn_metadata.seq_lens = seq_lens_buf[:seq_lens_n]
         if common_attn_metadata.seq_lens_cpu is not None:
             common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
         if common_attn_metadata._seq_lens_cpu is not None:
@@ -1692,10 +1707,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.slot_mapping_group[draft_index][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
-
-        self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
-        self.seq_lens_group[draft_index][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
-        common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]]
 
         self.query_start_loc_group[draft_index][: common_attn_metadata.query_start_loc.shape[0]].copy_(
             common_attn_metadata.query_start_loc
@@ -2060,7 +2071,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _adjust_block_table_tensor(self, tensor, desired_size):
         if self.block_table_tensor_clone is None or desired_size > self.block_table_tensor_clone.shape[0]:
             return self._adjust_tensor(tensor, desired_size)
-        buf = self.block_table_tensor_clone
+        return self._adjust_tensor_into_buf(tensor, desired_size, self.block_table_tensor_clone)
+
+    def _adjust_tensor_into_buf(self, tensor, desired_size, buf):
+        if desired_size > buf.shape[0]:
+            return self._adjust_tensor(tensor, desired_size)
         if tensor.data_ptr() == buf.data_ptr():
             if desired_size > tensor.shape[0]:
                 buf[tensor.shape[0] : desired_size].zero_()
