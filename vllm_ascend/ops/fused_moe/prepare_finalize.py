@@ -18,7 +18,6 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 import torch_npu
 from vllm.distributed.parallel_state import (
     get_dp_group,
@@ -50,6 +49,25 @@ class PrepareAndFinalize(ABC):
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
         self.lora_context = None
+        self._pad_buffers: dict[str, torch.Tensor] = {}
+
+    def _pad(
+        self,
+        tensor: torch.Tensor,
+        target_num_tokens: int,
+        capacity: int,
+        buffer_key: str,
+    ) -> torch.Tensor:
+        """Pad the token dimension into a lazily allocated instance buffer."""
+        num_tokens = tensor.shape[0]
+        assert num_tokens < target_num_tokens <= capacity
+        buffer = self._pad_buffers.get(buffer_key)
+        if buffer is None:
+            buffer = tensor.new_empty((capacity, *tensor.shape[1:]))
+            self._pad_buffers[buffer_key] = buffer
+        buffer[:num_tokens].copy_(tensor)
+        buffer[num_tokens:target_num_tokens].zero_()
+        return buffer[:target_num_tokens]
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
@@ -119,6 +137,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     def __init__(self, moe_config: FusedMoEConfig):
         super().__init__(moe_config)
         self._restore_tp_across_dp()
+        self._pad_capacity = max(self.moe_config.max_num_tokens, self.tp_size)
 
     def _restore_tp_across_dp(self):
         """Restore original TP configuration (same as MC2)."""
@@ -161,8 +180,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                 )
 
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                hidden_states = self._pad(hidden_states, self.tp_size, self._pad_capacity, "hidden")
+                router_logits = self._pad(router_logits, self.tp_size, self._pad_capacity, "router")
                 padded_hidden_states_shape = hidden_states.shape
 
             if self.tp_size > 1:
@@ -187,7 +206,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         if not (self.replace_allreduce or self.enable_shared_expert_dp):
             pad_size = self.tp_size - self.num_tokens
             if pad_size > 0:
-                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+                input_ids = self._pad(input_ids, self.tp_size, self._pad_capacity, "ids")
 
             if self.tp_size > 1:
                 input_ids = torch.tensor_split(input_ids, self.tp_size, dim=0)
@@ -240,6 +259,9 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     def __init__(self, moe_config: FusedMoEConfig):
         super().__init__(moe_config)
         self._restore_tp_across_dp()
+        self._pad_capacity = (
+            (self.moe_config.max_num_tokens + self.tp_size - 1) // self.tp_size
+        ) * self.tp_size
 
     def _restore_tp_across_dp(self):
         """
@@ -286,8 +308,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
 
             # Pad if necessary (unless shared expert DP is enabled)
             if pad_size > 0 and not self.enable_shared_expert_dp:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                hidden_states = self._pad(hidden_states, target_pad_length, self._pad_capacity, "hidden")
+                router_logits = self._pad(router_logits, target_pad_length, self._pad_capacity, "router")
                 padded_hidden_states_shape = hidden_states.shape
 
             # Slice across TP ranks
@@ -313,7 +335,7 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             target_pad_length = _EXTRA_CTX.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
             if pad_size > 0 and not self.enable_shared_expert_dp:
-                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+                input_ids = self._pad(input_ids, target_pad_length, self._pad_capacity, "ids")
 
             if self.tp_size > 1 and not self.enable_shared_expert_dp:
                 input_ids = torch.tensor_split(input_ids, self.tp_size, dim=0)
@@ -408,14 +430,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             self.num_tokens_pcp = hidden_states.shape[0]
             pad_size = max_tokens_across_pcp - self.num_tokens_pcp
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                pcp_pad_capacity = self.moe_config.max_num_tokens * self.moe_config.ep_size
+                hidden_states = self._pad(hidden_states, max_tokens_across_pcp, pcp_pad_capacity, "pcp_hidden")
+                router_logits = self._pad(router_logits, max_tokens_across_pcp, pcp_pad_capacity, "pcp_router")
                 if pertoken_scale is not None:
-                    pertoken_scale = (
-                        nn.functional.pad(pertoken_scale, (0, pad_size))
-                        if pertoken_scale.dim() == 1
-                        else nn.functional.pad(pertoken_scale, (0, 0, 0, pad_size))
-                    )
+                    pertoken_scale = self._pad(pertoken_scale, max_tokens_across_pcp, pcp_pad_capacity, "pcp_scale")
 
             hidden_states = get_pcp_group().all_gather(hidden_states, dim=0)
             router_logits = get_pcp_group().all_gather(router_logits, dim=0)
@@ -454,8 +473,9 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             self.num_tokens = hidden_states.shape[0]
             pad_size = max_tokens_across_dp - self.num_tokens
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                dp_pad_capacity = self.moe_config.max_num_tokens
+                hidden_states = self._pad(hidden_states, max_tokens_across_dp, dp_pad_capacity, "dp_hidden")
+                router_logits = self._pad(router_logits, max_tokens_across_dp, dp_pad_capacity, "dp_router")
 
             # All-gather across DP group
             hidden_states = self.moe_config.dp_group.all_gather(hidden_states, 0)
@@ -467,8 +487,9 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             self.num_tokens_pcp = hidden_states.shape[0]
             pad_size = max_tokens_across_pcp - self.num_tokens_pcp
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                pcp_pad_capacity = self.moe_config.max_num_tokens * self.moe_config.dp_size
+                hidden_states = self._pad(hidden_states, max_tokens_across_pcp, pcp_pad_capacity, "pcp_hidden")
+                router_logits = self._pad(router_logits, max_tokens_across_pcp, pcp_pad_capacity, "pcp_router")
 
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -492,7 +513,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
             pad_size = max_tokens_across_dp - self.num_tokens
             if pad_size > 0:
-                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+                input_ids = self._pad(input_ids, max_tokens_across_dp, self.moe_config.max_num_tokens, "dp_ids")
 
             input_ids = self.moe_config.dp_group.all_gather(input_ids, 0)
         return input_ids
