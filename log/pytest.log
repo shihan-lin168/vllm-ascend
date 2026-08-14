@@ -1,0 +1,44 @@
+(Worker_TP2 pid=155620) INFO 08-14 11:28:30 [cpu_binding.py:704] [irq] IRQ binding skipped on Ascend 950.
+(Worker_TP1 pid=155618) INFO 08-14 11:28:31 [cpu_binding.py:704] [irq] IRQ binding skipped on Ascend 950.
+(Worker_TP3 pid=155622) INFO 08-14 11:28:32 [cpu_binding.py:704] [irq] IRQ binding skipped on Ascend 950.
+(Worker_TP0 pid=155616) INFO 08-14 11:28:32 [cpu_binding.py:704] [irq] IRQ binding skipped on Ascend 950.
+(EngineCore pid=155610) INFO 08-14 11:28:32 [core.py:344] init engine (profile, create kv cache, warmup model) took 46.95 s (compilation: 18.00 s)
+(EngineCore pid=155610) [2026-08-14 11:28:32] [INFO] get env VLLM_DISABLE_SHARED_EXPERTS_STREAM = 1
+(EngineCore pid=155610) INFO 08-14 11:28:32 [kernel.py:306] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(EngineCore pid=155610) INFO 08-14 11:28:32 [utils.py:181] No quantization signature detected from model files for "/mnt/share/weights/Qwen3-0.6B". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(EngineCore pid=155610) [2026-08-14 11:28:32] [INFO] get env PYTORCH_NPU_ALLOC_CONF = expandable_segments:True
+(EngineCore pid=155610) INFO 08-14 11:28:32 [platform.py:1235] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+INFO 08-14 11:28:33 [hf.py:540] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+Rendering prompts: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 44.88it/s]
+Processed prompts:   0%|                                                                                                                                           | 0/4 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](Worker_TP0 pid=155616) INFO 08-14 11:28:33 [acl_graph.py:268] Replaying aclgraph
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029] WorkerProc hit an exception.
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029] Traceback (most recent call last):
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/vllm/vllm/v1/executor/multiproc_executor.py", line 1021, in worker_busy_loop
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     output = func(*args, **kwargs)
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]              ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/vllm/vllm/v1/worker/worker_base.py", line 351, in execute_model
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     return self.worker.execute_model(scheduler_output)
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/vllm-ascend/vllm_ascend/worker/worker.py", line 716, in execute_model
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/venv/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     return func(*args, **kwargs)
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 2133, in execute_model
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     hidden_states = self._model_forward(
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]                     ^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 2688, in _model_forward
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 2651, in _update_full_graph_params_if_needed
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     update_full_graph_params(
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/vllm-ascend/vllm_ascend/compilation/acl_graph.py", line 305, in update_full_graph_params
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     impl_cls.update_graph_params(
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/vllm-ascend/vllm_ascend/attention/attention_v1.py", line 818, in update_graph_params
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     torch_npu.npu_fused_infer_attention_score.out(
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]   File "/mnt/share/l00838859/vllm-project/venv/lib/python3.11/site-packages/torch/_ops.py", line 819, in __call__
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]     return self._op(*args, **kwargs)
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029] RuntimeError: npu_fused_infer_attention_score_out_symint:../third_party/op-plugin/op_plugin/ops/opapi/FusedInferAttentionScoreKernelNpuOpApi.cpp:536 NPU function error: call aclnnFusedInferAttentionScoreV5 failed, error code is 561002
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029] [ERROR] 2026-08-14-11:28:33 (PID:155620, Device:2, RankID:-1) ERR00100 PTA call acl api failed.
+(Worker_TP2 pid=155620) ERROR 08-14 11:28:33 [multiproc_executor.py:1029] [PID: 155620] 2026-08-14-11:28:33.451.082 Invalid_Argument_Tensor_Shape(EZ0009): Parameter block_table of FusedInferAttentionScore has incorrect shape [8, 8]. Reason: When page attention enable, block_table shape must be [batch_size(2), >=max_block_num_per_batch(1)].
