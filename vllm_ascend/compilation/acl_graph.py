@@ -12,7 +12,6 @@ from unittest.mock import patch
 import torch
 import torch_npu
 import vllm.envs as envs
-from torch.utils._python_dispatch import TorchDispatchMode
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
@@ -48,22 +47,30 @@ def _super_kernel_scope(scope: str, enabled: bool):
         torch.npu.super_kernel_scope_end(scope)
 
 
-class _SuperKernelExclusionMode(TorchDispatchMode):
-    def __init__(self):
-        super().__init__()
-        self.npu_quant_matmul_count = 0
+@dataclass
+class _SuperKernelExclusionState:
+    npu_quant_matmul_count: int = 0
 
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        kwargs = kwargs or {}
-        if func is not torch.ops.npu.npu_quant_matmul.default:
-            return func(*args, **kwargs)
 
-        self.npu_quant_matmul_count += 1
+@contextmanager
+def _exclude_npu_quant_matmul_from_super_kernel(enabled: bool):
+    state = _SuperKernelExclusionState()
+    if not enabled:
+        yield state
+        return
+
+    original_op = torch_npu.npu_quant_matmul
+
+    def wrapped_op(*args, **kwargs):
+        state.npu_quant_matmul_count += 1
         torch.npu.super_kernel_scope_begin(None)
         try:
-            return func(*args, **kwargs)
+            return original_op(*args, **kwargs)
         finally:
             torch.npu.super_kernel_scope_end(None)
+
+    with patch.object(torch_npu, "npu_quant_matmul", wrapped_op):
+        yield state
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -220,14 +227,12 @@ class ACLGraphWrapper:
                 get_offloader().sync_prev_onload()
                 forward_context.capturing = True
                 try:
-                    exclusion_mode = _SuperKernelExclusionMode()
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
                         with _super_kernel_scope("full_model", self.enable_super_kernel):
-                            if self.enable_super_kernel:
-                                with exclusion_mode:
-                                    output = self.runnable(*args, **kwargs)
-                            else:
+                            with _exclude_npu_quant_matmul_from_super_kernel(
+                                self.enable_super_kernel
+                            ) as exclusion_state:
                                 output = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
                         # unjoined stream error. The last layer's start_prefetch
@@ -245,7 +250,7 @@ class ACLGraphWrapper:
                     if self.enable_super_kernel:
                         logger.warning(
                             "[l00838859][SK_EXCLUSION] captured npu_quant_matmul=%d",
-                            exclusion_mode.npu_quant_matmul_count,
+                            exclusion_state.npu_quant_matmul_count,
                         )
                 except RuntimeError as exc:
                     if _is_old_hdk_capture_error(exc):
