@@ -68,6 +68,37 @@ def fusion_pass_compile(
     return compiled_fn, None
 
 
+def _insert_super_kernel_exclusion_scopes(
+    graph: fx.GraphModule,
+    *,
+    enabled: bool,
+    excluded_ops: set[Callable] | None = None,
+    scope_begin_op: Callable | None = None,
+    scope_end_op: Callable | None = None,
+) -> None:
+    if not enabled:
+        return
+
+    if excluded_ops is None:
+        excluded_ops = {torch.ops.npu.npu_quant_matmul.default}
+    if scope_begin_op is None:
+        scope_begin_op = torch.ops.npu.super_kernel_scope_begin.default
+    if scope_end_op is None:
+        scope_end_op = torch.ops.npu.super_kernel_scope_end.default
+
+    fx_graph = graph.graph
+    for node in list(fx_graph.nodes):
+        if node.op != "call_function" or node.target not in excluded_ops:
+            continue
+        with fx_graph.inserting_before(node):
+            fx_graph.call_function(scope_begin_op, args=(None,))
+        with fx_graph.inserting_after(node):
+            fx_graph.call_function(scope_end_op, args=(None,))
+
+    fx_graph.lint()
+    graph.recompile()
+
+
 def _compute_decode_cudagraph_batch_sizes(vllm_config: VllmConfig) -> list[int]:
     num_spec_tokens = vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
     uniform_decode_query_len = num_spec_tokens + 1
@@ -161,6 +192,11 @@ def npugraph_ex_compile(
     key: str | None = None,
     cache_dir: str | None = None,
 ) -> tuple[Callable | None, Any | None]:
+    _insert_super_kernel_exclusion_scopes(
+        graph,
+        enabled=ascend_compilation_config.enable_super_kernel,
+    )
+
     # Try npugraph_ex first, fall back to torchair for backward compatibility.
     try:
         import npugraph_ex as nge
