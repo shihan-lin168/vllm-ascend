@@ -35,7 +35,7 @@ _OLD_HDK_CAPTURE_ERROR_MARKERS = ("alloc sq cq fail",)
 
 
 @contextmanager
-def _super_kernel_scope(scope: str, enabled: bool):
+def super_kernel_scope(scope: str, enabled: bool):
     if not enabled:
         yield
         return
@@ -203,7 +203,7 @@ class ACLGraphWrapper:
                 try:
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
-                        with _super_kernel_scope("full_model", self.enable_super_kernel):
+                        with super_kernel_scope("full_model", self.enable_super_kernel):
                             output = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
                         # unjoined stream error. The last layer's start_prefetch
